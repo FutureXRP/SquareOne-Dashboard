@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    // proxy: { "/api": "http://localhost:8787" },
+    // Forward /api calls to the backend proxy (server/index.js) that holds the keys.
+    proxy: { "/api": "http://localhost:8787" },
   },
 });

@@ -7,65 +7,87 @@ business side — room bookings, membership, cameras, and the Early Learning Cen
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # production build into dist/
+cp .env.example .env     # then fill in any credentials you have (optional)
+npm run dev:all          # frontend (http://localhost:5173) + backend proxy together
 ```
+
+Or run the two pieces separately:
+
+```bash
+npm run dev        # frontend only  -> http://localhost:5173
+npm run server     # backend proxy  -> http://localhost:8787
+npm run build      # production build of the frontend into dist/
+```
+
+**You don't need any credentials to run it.** With an empty `.env`, every tab shows
+realistic sample data and the status bar marks each integration "sample". As you add
+keys, those tabs flip to live automatically — no code change.
 
 ## Tabs
 
-| Tab | Source | Status |
-|-----|--------|--------|
-| Home | all systems (summary) | preview |
-| Security | Home Assistant hub (Gemini alarm, GV doors) | preview |
-| Climate | Home Assistant hub (Pro1 HVAC) | preview |
-| **Bookings** | **Amilia** (rooms booked today) | preview |
-| **Members** | **Amilia** (counts, types, check-ins) | preview |
-| **Cameras** | **Hik-Connect** (status, snapshots, live view) | preview |
-| **ELC** | **ProCare** (attendance, staff ratios) | preview |
-| Routines / Automation / Alerts / Assistant | derived | preview |
-
-Everything currently runs in **preview mode** — it shows realistic sample data so
-the UI can be reviewed before any live system is touched.
+| Tab | Source | Live wiring |
+|-----|--------|-------------|
+| Home | all systems (summary) | — |
+| Security | Home Assistant hub (Gemini alarm, GV doors) | via `hub` seam |
+| Climate | Home Assistant hub (Pro1 HVAC) | via `hub` seam |
+| **Bookings** | **Amilia** — rooms booked today | ✅ built |
+| **Members** | **Amilia** — counts, types, check-ins | ✅ built |
+| **Cameras** | **Hik-Connect** (EZVIZ Open Platform) | ✅ built |
+| **ELC** | **ProCare** — attendance, staff ratios | ⚠️ needs API access |
+| Routines / Automation / Alerts / Assistant | derived | — |
 
 ## Architecture: two kinds of system, two seams
 
-`src/SquareOneOps.jsx` has exactly two places where live data is wired:
+`src/SquareOneOps.jsx` keeps a clean separation between the two integration styles:
 
-1. **`hub`** — on-site/LAN devices (alarm, HVAC, doors). These have no clean cloud
-   API, so an on-site Home Assistant instance adapts all three and exposes one REST
-   API. Every device *action* flows through `hub`.
+1. **`hub`** — on-site/LAN devices (alarm, HVAC, doors). No clean cloud API, so an
+   on-site Home Assistant instance adapts all three and exposes one REST API. Every
+   device *action* flows through `hub`. (Still in preview; wire to your HA instance.)
 
-2. **`api`** — cloud SaaS reads (Amilia, Hik-Connect, ProCare). These have secret API
-   keys and block direct browser calls (CORS), so they **must** go through your own
-   backend proxy. The browser calls `/api/...`; the proxy adds the secret key and
-   talks to the vendor. Every cloud *read* flows through `api`.
+2. **The backend proxy (`server/`)** — cloud SaaS reads (Amilia, Hik-Connect,
+   ProCare). These have secret keys and block direct browser calls (CORS), so the
+   browser only ever calls `/api/*`; the proxy adds the key and talks to the vendor.
+   `src/useDashboardData.js` calls the proxy, detects what's configured via
+   `/api/health`, and falls back to sample data for anything not set up.
 
-Flip the flags in `CONNECTED` (top of `SquareOneOps.jsx`) as each integration goes live.
+```
+browser ──/api/amilia/...──▶ server/ (holds keys) ──▶ app.amilia.com
+        ──/api/hik/...─────▶                       ──▶ open.ezvizlife.com
+        ──/api/procare/...─▶                       ──▶ (your ProCare access)
+```
 
-## Wiring live data (recommended order)
+## Connecting each integration
 
-You need a small backend proxy (Node/Express, a serverless function, etc.) that holds
-the keys. Uncomment the `/api` proxy in `vite.config.js` to point at it in dev.
+Fill in the relevant section of `.env` (copied from `.env.example`) and restart the
+proxy. The matching tab flips from "sample" to "live" on the next refresh.
 
-### 1. Amilia (members + bookings) — easiest
-- SmartRec has a documented REST API with OAuth2 (client credentials).
-- Proxy endpoints to build: `GET /api/amilia/bookings?date=` and
-  `GET /api/amilia/members/summary`.
-- Then point `api.getBookings` / `api.getMembers` at them and set `CONNECTED.amilia = true`.
+### Amilia (members + bookings) — ready
+- Make a dedicated service account in your Amilia org (its own email + password,
+  in an "Integrations" permission group).
+- Set `AMILIA_EMAIL`, `AMILIA_PASSWORD`, `AMILIA_ORG_ID` (numeric id or URL slug).
+- Auth flow: `GET /api/V3/authenticate` (Basic auth) → JWT (cached ~1yr) → Bearer.
+- Endpoints used: `/memberships` (+ each `/persons` count) and `/events` for the
+  day's schedule. See `server/providers/amilia.js`.
 
-### 2. Hik-Connect (cameras)
-- Status + snapshots are straightforward via the Hikvision Open Platform / partner API
-  (or local HikCentral ISAPI on the LAN).
-- **Live video** needs a streaming bridge (RTSP → HLS or WebRTC) running on the proxy;
-  it cannot be embedded directly from the camera in a browser.
-- Proxy endpoints: `GET /api/hik/cameras`, `GET /api/hik/cameras/{id}/snapshot.jpg`.
+### Hik-Connect cameras — ready
+- Hik-Connect accounts are served by the **EZVIZ Open Platform**. Register a
+  developer app at `open.ezvizlife.com` (or `open.ys7.com`), **matching the region**
+  of the account that owns the cameras, to get an `appKey` + `appSecret`.
+- Set `HIK_APP_KEY`, `HIK_APP_SECRET` (and `HIK_BASE_URL` for your region).
+- Endpoints used: `token/get` (7-day token, cached, honors `areaDomain`),
+  `device/list` (status), `device/capture` (snapshot), `live/address/get` (HLS).
+  See `server/providers/hik.js`.
+- Live video: the `/api/hik/cameras/:id/live` endpoint returns an HLS URL you can
+  drop into a `<video>` with hls.js. (Camera tiles currently show snapshots.)
 
-### 3. ProCare (ELC) — confirm access first
-- ProCare does **not** publish a broadly-available public API. Before building this
-  integration, confirm partner/API access for your account. A reports export may be
-  the only option otherwise.
-- Proxy endpoint: `GET /api/procare/elc/today`.
+### ProCare (ELC) — needs access confirmation first
+- ProCare does **not** publish a broadly-available public API. Ask your ProCare rep
+  whether partner/API access is available for your account.
+- If you get it: set `PROCARE_BASE_URL`, `PROCARE_API_KEY`, then adjust the endpoint
+  path/field mapping in `server/providers/procare.js` to match what they give you.
+- Until then this tab stays on sample data and the UI says so.
 
 ## Security notes
-- No vendor API keys live in this repo or the browser bundle. Keep them server-side.
-- `.env` files are gitignored. The proxy reads keys from its own environment.
+- No vendor keys live in this repo or the browser bundle. They stay server-side.
+- `.env` is git-ignored. The proxy reads keys from its own environment.
+- Don't paste credentials into chat or commits — only into your local `.env`.

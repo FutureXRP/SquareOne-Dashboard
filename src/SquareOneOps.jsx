@@ -6,6 +6,7 @@ import {
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
   DoorOpen, Building2, TrendingUp,
 } from "lucide-react";
+import { useDashboardData } from "./useDashboardData.js";
 
 /*
   SquareOne Operations Center
@@ -47,13 +48,9 @@ const C = {
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
-// Flip each to true once its live integration is wired and verified.
-const CONNECTED = {
-  hub: false,      // Home Assistant (alarm / HVAC / doors)
-  amilia: false,   // Members + room bookings
-  hik: false,      // Hik-Connect cameras
-  procare: false,  // ELC
-};
+// The on-site hub (Home Assistant) is wired separately from the cloud APIs.
+// Cloud connection state (Amilia/Hik/ProCare) is detected live from the backend.
+const HUB_CONNECTED = false;
 
 const TABS = [
   ["home", "Home", Activity],
@@ -135,11 +132,9 @@ export default function SquareOneOps() {
     { id: "off", name: "Offices", set: 73, now: 73, hum: 46, mode: "Cool" },
   ]);
 
-  // Cloud-sourced state (preview: seeded from mock data above).
-  const [bookings] = useState(MOCK_BOOKINGS);
-  const [members] = useState(MOCK_MEMBERS);
-  const [cameras] = useState(MOCK_CAMERAS);
-  const [elc] = useState(MOCK_ELC);
+  // Cloud data: live from the backend proxy when configured, sample data otherwise.
+  const { bookings, members, cameras, elc, connected, usingMock, reload, snapshotUrl } =
+    useDashboardData({ bookings: MOCK_BOOKINGS, members: MOCK_MEMBERS, cameras: MOCK_CAMERAS, elc: MOCK_ELC });
 
   const [opening, setOpening] = useState(
     ["Unlock doors", "Disarm alarm", "HVAC to day mode", "Coffee started", "TVs on", "Golf sim ready", "Music playing"].map((l, i) => ({ id: i, label: l, done: false }))
@@ -186,32 +181,11 @@ export default function SquareOneOps() {
     clearLockdown: () => { setLockdown(false); pushLog("Lockdown cleared", "go"); },
   }), []);
 
-  /* ---- SEAM 2: every CLOUD read goes through here (via your backend proxy) ----
-     These are READ-only today. In production each fetches from your proxy, which
-     holds the vendor API key. Wire them one vendor at a time; flip CONNECTED.* on.
-
-     Amilia (SmartRec REST API, OAuth2 client-credentials):
-       getBookings:  GET /api/amilia/bookings?date=YYYY-MM-DD
-         -> proxy: GET https://api.amilia.com/v3/orgs/{orgId}/... (facility schedule)
-       getMembers:   GET /api/amilia/members/summary
-         -> proxy: GET https://api.amilia.com/v3/orgs/{orgId}/members (+ aggregate)
-
-     Hik-Connect (Hikvision Open Platform / partner API, or local HikCentral ISAPI):
-       getCameras:   GET /api/hik/cameras            (status + last motion)
-       getSnapshot:  GET /api/hik/cameras/{id}/snapshot.jpg
-       Live video needs a streaming bridge (RTSP -> HLS/WebRTC) on the proxy.
-
-     ProCare (NOTE: no broadly-available public API as of now — confirm partner
-       access for your account; may require their reports export or a partner key):
-       getElc:       GET /api/procare/elc/today      (attendance + ratios)
-  */
-  const api = useMemo(() => ({
-    getBookings: async () => bookings, // PROD: fetch("/api/amilia/bookings?date=...").then(r=>r.json())
-    getMembers:  async () => members,  // PROD: fetch("/api/amilia/members/summary").then(r=>r.json())
-    getCameras:  async () => cameras,  // PROD: fetch("/api/hik/cameras").then(r=>r.json())
-    snapshotUrl: (id) => null,         // PROD: `/api/hik/cameras/${id}/snapshot.jpg`
-    getElc:      async () => elc,      // PROD: fetch("/api/procare/elc/today").then(r=>r.json())
-  }), [bookings, members, cameras, elc]);
+  /* ---- SEAM 2: cloud reads ----
+     All cloud data (Amilia/Hik/ProCare) is fetched server-side by the backend
+     proxy in server/* and delivered here by useDashboardData(). The proxy holds
+     the API keys; the browser only ever calls /api/*. See server/README and the
+     per-provider modules for the exact upstream endpoints.                       */
 
   // Campus verdict
   const verdict = useMemo(() => {
@@ -251,7 +225,7 @@ export default function SquareOneOps() {
           <ClockReadout />
         </header>
 
-        <ConnectionBar />
+        <ConnectionBar connected={{ hub: HUB_CONNECTED, ...connected }} onReload={reload} />
 
         {/* Verdict hero */}
         <Verdict v={verdict} />
@@ -276,10 +250,10 @@ export default function SquareOneOps() {
         {tab === "home" && <Home doors={doors} zones={zones} alarm={alarm} log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} elc={elc} />}
         {tab === "security" && <Security doors={doors} alarm={alarm} hub={hub} lockdown={lockdown} />}
         {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
-        {tab === "bookings" && <Bookings bookings={bookings} />}
-        {tab === "members" && <Members members={members} />}
-        {tab === "cameras" && <Cameras cameras={cameras} api={api} />}
-        {tab === "elc" && <Elc elc={elc} />}
+        {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
+        {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
+        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} />}
+        {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
         {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
         {tab === "automation" && <Automation />}
         {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} />}
@@ -305,12 +279,12 @@ function Panel({ title, right, children, accent }) {
 }
 
 // Shows which integrations are live vs preview. Honest at a glance.
-function ConnectionBar() {
+function ConnectionBar({ connected, onReload }) {
   const items = [
-    ["Hub", CONNECTED.hub],
-    ["Amilia", CONNECTED.amilia],
-    ["Hik-Connect", CONNECTED.hik],
-    ["ProCare", CONNECTED.procare],
+    ["Hub", connected.hub],
+    ["Amilia", connected.amilia],
+    ["Hik-Connect", connected.hik],
+    ["ProCare", connected.procare],
   ];
   const anyPreview = items.some(([, on]) => !on);
   return (
@@ -319,13 +293,19 @@ function ConnectionBar() {
         ? <AlertTriangle size={14} color={C.amber} />
         : <CircleCheck size={14} color={C.go} />}
       <span style={{ color: C.mid }}>
-        {anyPreview ? "Preview mode — these show sample data until wired:" : "All integrations live."}
+        {anyPreview ? "Preview — sample data until each is configured:" : "All integrations live."}
       </span>
       {items.map(([name, on]) => (
         <span key={name} className="flex items-center gap-1.5" style={{ color: on ? C.go : C.dim }}>
           {on ? <Wifi size={12} /> : <WifiOff size={12} />}{name}
         </span>
       ))}
+      {onReload && (
+        <button onClick={onReload} className="so-btn flex items-center gap-1.5"
+          style={{ marginLeft: "auto", padding: "4px 10px", borderRadius: 6, fontSize: 12, fontFamily: mono, color: C.cyan }}>
+          <RefreshCw size={12} /> refresh
+        </button>
+      )}
     </div>
   );
 }
@@ -551,7 +531,7 @@ function Preset({ icon: Icon, label, onClick }) {
 }
 
 /* ----------------------------- BOOKINGS (Amilia) ----------------------------- */
-function Bookings({ bookings }) {
+function Bookings({ bookings, live }) {
   const rooms = [...new Set(bookings.map((b) => b.room))];
   const totalPeople = bookings.reduce((n, b) => n + b.party, 0);
   return (
@@ -562,7 +542,8 @@ function Bookings({ bookings }) {
         <Stat label="Expected guests" value={totalPeople} icon={Users} color={C.cyan} />
       </div>
       <Panel title="Today's Room Schedule" accent={C.cyan}
-        right={<span style={{ fontFamily: mono, fontSize: 11, color: C.dim }}>{CONNECTED.amilia ? "Amilia · live" : "Amilia · sample"}</span>}>
+        right={<SourceTag live={live} name="Amilia" />}>
+      {bookings.length === 0 && <Empty text="No bookings for today." />}
         {bookings.map((b) => (
           <div key={b.id} className="flex items-center gap-3" style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
             <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 96 }}>{b.start}–{b.end}</span>
@@ -585,8 +566,8 @@ function Bookings({ bookings }) {
 }
 
 /* ----------------------------- MEMBERS (Amilia) ----------------------------- */
-function Members({ members }) {
-  const max = Math.max(...members.byType.map((t) => t.count));
+function Members({ members, live }) {
+  const max = Math.max(1, ...members.byType.map((t) => t.count));
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
@@ -596,7 +577,7 @@ function Members({ members }) {
         <Stat label="Checked in now" value={members.checkedInNow} icon={DoorOpen} color={C.cyan} />
       </div>
       <Panel title="Membership by Type" accent={C.cyan}
-        right={<span style={{ fontFamily: mono, fontSize: 11, color: C.dim }}>{CONNECTED.amilia ? "Amilia · live" : "Amilia · sample"}</span>}>
+        right={<SourceTag live={live} name="Amilia" />}>
         {members.byType.map((t) => (
           <div key={t.type} style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
             <div className="flex items-center justify-between" style={{ fontSize: 13.5, marginBottom: 6 }}>
@@ -614,7 +595,7 @@ function Members({ members }) {
 }
 
 /* ----------------------------- CAMERAS (Hik-Connect) ----------------------------- */
-function Cameras({ cameras, api }) {
+function Cameras({ cameras, snapshotUrl }) {
   const online = cameras.filter((c) => c.online).length;
   return (
     <div className="grid gap-3">
@@ -625,7 +606,7 @@ function Cameras({ cameras, api }) {
       </div>
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
         {cameras.map((c) => {
-          const snap = api.snapshotUrl(c.id); // null in preview
+          const snap = c.online ? snapshotUrl(c.id) : null; // null in preview / when offline
           return (
             <Panel key={c.id} title={c.name} accent={c.online ? C.go : C.red}
               right={<span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 11, color: c.online ? C.go : C.red }}>
@@ -661,7 +642,7 @@ function Cameras({ cameras, api }) {
 }
 
 /* ----------------------------- ELC (ProCare) ----------------------------- */
-function Elc({ elc }) {
+function Elc({ elc, live }) {
   const ratioOk = elc.staffPresent >= elc.requiredRatioStaff;
   return (
     <div className="grid gap-3">
@@ -672,7 +653,7 @@ function Elc({ elc }) {
         <Stat label="Parent messages" value={elc.unreadMessages} sub="unread" icon={Bell} color={elc.unreadMessages ? C.amber : C.dim} />
       </div>
       <Panel title="Rooms" accent={ratioOk ? C.go : C.red}
-        right={<span style={{ fontFamily: mono, fontSize: 11, color: C.dim }}>{CONNECTED.procare ? "ProCare · live" : "ProCare · sample"}</span>}>
+        right={<SourceTag live={live} name="ProCare" />}>
         {elc.rooms.map((r) => {
           const full = r.present >= r.capacity;
           return (
@@ -693,7 +674,7 @@ function Elc({ elc }) {
           );
         })}
       </Panel>
-      {!CONNECTED.procare && (
+      {!live && (
         <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, padding: "0 2px" }}>
           Note: ProCare does not publish a broadly-available public API. Confirm partner/API
           access for your account before wiring this tab to live data.
@@ -877,4 +858,13 @@ function Assistant({ hub, doors, zones, alarm }) {
 
 function Empty({ text }) {
   return <div style={{ color: C.dim, fontSize: 13, fontStyle: "italic", padding: "6px 0" }}>{text}</div>;
+}
+
+// "Amilia · live" / "Amilia · sample" tag for a panel header.
+function SourceTag({ live, name }) {
+  return (
+    <span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 11, color: live ? C.go : C.dim }}>
+      {live ? <Wifi size={11} /> : <WifiOff size={11} />}{name} · {live ? "live" : "sample"}
+    </span>
+  );
 }
