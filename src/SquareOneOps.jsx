@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect, useCallback, Suspense, lazy } from "react";
 import {
   ShieldCheck, ShieldAlert, Lock, Unlock, Thermometer, ListChecks,
   Clock, Bell, Terminal, ChevronUp, ChevronDown, Send, Power,
@@ -7,6 +7,9 @@ import {
   DoorOpen, Building2, TrendingUp,
 } from "lucide-react";
 import { useDashboardData } from "./useDashboardData.js";
+import { useHub } from "./useHub.js";
+// Lazy so hls.js (the bulk of the bundle) only loads when a live view is opened.
+const LivePlayer = lazy(() => import("./LivePlayer.jsx").then((m) => ({ default: m.LivePlayer })));
 
 /*
   SquareOne Operations Center
@@ -48,9 +51,6 @@ const C = {
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
-// The on-site hub (Home Assistant) is wired separately from the cloud APIs.
-// Cloud connection state (Amilia/Hik/ProCare) is detected live from the backend.
-const HUB_CONNECTED = false;
 
 const TABS = [
   ["home", "Home", Activity],
@@ -65,12 +65,6 @@ const TABS = [
   ["alerts", "Alerts", Bell],
   ["assistant", "Assistant", Terminal],
 ];
-
-const PRESETS = {
-  Morning: { Medical: 72, "Early Learning": 72, Fitness: 71, Offices: 73 },
-  Night:   { Medical: 77, "Early Learning": 78, Fitness: 78, Offices: 78 },
-  Vacation:{ Medical: 82, "Early Learning": 82, Fitness: 82, Offices: 82 },
-};
 
 /* ------------------------- preview mock data (cloud) ------------------------- */
 // Amilia — rooms booked today + membership summary.
@@ -116,23 +110,21 @@ const MOCK_ELC = {
 export default function SquareOneOps() {
   const [tab, setTab] = useState("home");
 
-  const [doors, setDoors] = useState([
-    { id: "main", name: "Main Entrance", locked: true },
-    { id: "med", name: "Medical", locked: true },
-    { id: "fit", name: "Fitness", locked: true },
-    { id: "elc", name: "Early Learning", locked: true },
-  ]);
-  const [alarm, setAlarm] = useState("armed_away"); // disarmed | armed_stay | armed_away
-  const [lockdown, setLockdown] = useState(false);
+  const [log, setLog] = useState([]);
+  const pushLog = useCallback(
+    (msg, kind = "info") => setLog((l) => [{ t: new Date(), msg, kind }, ...l].slice(0, 40)),
+    []
+  );
 
-  const [zones, setZones] = useState([
-    { id: "med", name: "Medical", set: 72, now: 73, hum: 47, mode: "Cool" },
-    { id: "elc", name: "Early Learning", set: 72, now: 75, hum: 52, mode: "Cool" },
-    { id: "fit", name: "Fitness", set: 71, now: 71, hum: 44, mode: "Cool" },
-    { id: "off", name: "Offices", set: 73, now: 73, hum: 46, mode: "Cool" },
-  ]);
+  /* ---- SEAM 1: the on-site hub (alarm / HVAC / doors) ----
+     Live via Home Assistant when configured, local preview otherwise.
+     See src/useHub.js and server/providers/homeassistant.js.                     */
+  const { doors, alarm, zones, lockdown, hub, connected: hubConnected, reloadHub } = useHub(pushLog);
 
-  // Cloud data: live from the backend proxy when configured, sample data otherwise.
+  /* ---- SEAM 2: cloud reads (Amilia / Hik-Connect / ProCare) ----
+     Fetched server-side by the backend proxy (server/*) and delivered here by
+     useDashboardData(). The proxy holds the API keys; the browser only ever
+     calls /api/*.                                                                */
   const { bookings, members, cameras, elc, connected, usingMock, reload, snapshotUrl } =
     useDashboardData({ bookings: MOCK_BOOKINGS, members: MOCK_MEMBERS, cameras: MOCK_CAMERAS, elc: MOCK_ELC });
 
@@ -142,50 +134,6 @@ export default function SquareOneOps() {
   const [closing, setClosing] = useState(
     ["Lock doors", "Arm alarm", "HVAC night mode", "Lights off", "Golf sim shutdown", "Arcade shutdown", "Medical closed"].map((l, i) => ({ id: i, label: l, done: false }))
   );
-
-  const [log, setLog] = useState([]);
-  const pushLog = (msg, kind = "info") =>
-    setLog((l) => [{ t: new Date(), msg, kind }, ...l].slice(0, 40));
-
-  /* ---- SEAM 1: every live LAN device call goes through here ---- */
-  const hub = useMemo(() => ({
-    lockDoor: (id) => {
-      // PROD: POST {HUB}/api/services/lock/lock { entity_id: `lock.${id}` }
-      setDoors((d) => d.map((x) => x.id === id ? { ...x, locked: true } : x));
-      pushLog(`Locked ${id}`, "go");
-    },
-    unlockDoor: (id) => {
-      // PROD: POST {HUB}/api/services/lock/unlock { entity_id: `lock.${id}` }
-      setDoors((d) => d.map((x) => x.id === id ? { ...x, locked: false } : x));
-      pushLog(`Unlocked ${id}`, "amber");
-    },
-    lockAll: () => { setDoors((d) => d.map((x) => ({ ...x, locked: true }))); pushLog("Locked all doors", "go"); },
-    unlockAll: () => { setDoors((d) => d.map((x) => ({ ...x, locked: false }))); pushLog("Unlocked all doors", "amber"); },
-    arm: (mode = "armed_away") => { setAlarm(mode); pushLog(`Alarm ${mode.replace("_", " ")}`, "go"); },
-    disarm: () => { setAlarm("disarmed"); pushLog("Alarm disarmed", "amber"); },
-    setTemp: (zoneId, val) => {
-      // PROD: POST {HUB}/api/services/climate/set_temperature { entity_id, temperature }
-      setZones((z) => z.map((x) => x.id === zoneId ? { ...x, set: Math.max(60, Math.min(85, val)) } : x));
-      pushLog(`Set ${zoneId} to ${val}°`, "cyan");
-    },
-    applyPreset: (name) => {
-      const p = PRESETS[name];
-      setZones((z) => z.map((x) => p[x.name] != null ? { ...x, set: p[x.name] } : x));
-      pushLog(`Applied ${name} climate preset`, "cyan");
-    },
-    lockdown: () => {
-      setDoors((d) => d.map((x) => ({ ...x, locked: true })));
-      setAlarm("armed_away"); setLockdown(true);
-      pushLog("EMERGENCY LOCKDOWN engaged", "red");
-    },
-    clearLockdown: () => { setLockdown(false); pushLog("Lockdown cleared", "go"); },
-  }), []);
-
-  /* ---- SEAM 2: cloud reads ----
-     All cloud data (Amilia/Hik/ProCare) is fetched server-side by the backend
-     proxy in server/* and delivered here by useDashboardData(). The proxy holds
-     the API keys; the browser only ever calls /api/*. See server/README and the
-     per-provider modules for the exact upstream endpoints.                       */
 
   // Campus verdict
   const verdict = useMemo(() => {
@@ -225,7 +173,7 @@ export default function SquareOneOps() {
           <ClockReadout />
         </header>
 
-        <ConnectionBar connected={{ hub: HUB_CONNECTED, ...connected }} onReload={reload} />
+        <ConnectionBar connected={{ hub: hubConnected, ...connected }} onReload={() => { reload(); reloadHub(); }} />
 
         {/* Verdict hero */}
         <Verdict v={verdict} />
@@ -252,7 +200,7 @@ export default function SquareOneOps() {
         {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
         {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
         {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
-        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} />}
+        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik} />}
         {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
         {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
         {tab === "automation" && <Automation />}
@@ -595,8 +543,9 @@ function Members({ members, live }) {
 }
 
 /* ----------------------------- CAMERAS (Hik-Connect) ----------------------------- */
-function Cameras({ cameras, snapshotUrl }) {
+function Cameras({ cameras, snapshotUrl, liveEnabled }) {
   const online = cameras.filter((c) => c.online).length;
+  const [liveCam, setLiveCam] = useState(null); // camera currently shown in the HLS modal
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
@@ -607,36 +556,58 @@ function Cameras({ cameras, snapshotUrl }) {
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
         {cameras.map((c) => {
           const snap = c.online ? snapshotUrl(c.id) : null; // null in preview / when offline
+          const canLive = liveEnabled && c.online;
           return (
             <Panel key={c.id} title={c.name} accent={c.online ? C.go : C.red}
               right={<span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 11, color: c.online ? C.go : C.red }}>
                 {c.online ? <Wifi size={12} /> : <WifiOff size={12} />}{c.online ? "online" : "offline"}
               </span>}>
-              {/* Video tile. In preview there's no feed; production shows a snapshot
-                  poll here and a click-through to live view (HLS/WebRTC) via the proxy. */}
-              <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
-                display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
-                {snap ? (
-                  <img src={snap} alt={c.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                ) : (
-                  <div className="flex flex-col items-center gap-1" style={{ color: C.dim, fontFamily: mono, fontSize: 12 }}>
-                    <Video size={22} color={c.online ? C.dim : C.red} />
-                    {c.online ? "feed via Hik-Connect" : "camera offline"}
-                  </div>
-                )}
-                {c.recording && (
-                  <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
-                    <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
-                  </span>
-                )}
-              </div>
+              {/* Snapshot tile; click for live HLS when the camera is connected. */}
+              <button onClick={() => canLive && setLiveCam(c)} disabled={!canLive}
+                style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default" }}>
+                <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
+                  display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
+                  {snap ? (
+                    <img src={snap} alt={c.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ) : (
+                    <div className="flex flex-col items-center gap-1" style={{ color: C.dim, fontFamily: mono, fontSize: 12 }}>
+                      <Video size={22} color={c.online ? C.dim : C.red} />
+                      {c.online ? "feed via Hik-Connect" : "camera offline"}
+                    </div>
+                  )}
+                  {c.recording && (
+                    <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
+                    </span>
+                  )}
+                  {canLive && (
+                    <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.25)", opacity: 0, transition: "opacity .15s" }}
+                      onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)} onMouseLeave={(e) => (e.currentTarget.style.opacity = 0)}>
+                      <span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 12, color: C.text, background: "rgba(0,0,0,.6)", padding: "6px 12px", borderRadius: 99 }}>
+                        <Video size={13} color={C.cyan} /> Live
+                      </span>
+                    </span>
+                  )}
+                </div>
+              </button>
               <div className="flex items-center justify-between" style={{ marginTop: 10, fontFamily: mono, fontSize: 12, color: C.mid }}>
                 <span className="flex items-center gap-1.5"><Activity size={12} />motion {c.motion}</span>
+                {canLive && (
+                  <button onClick={() => setLiveCam(c)} className="so-btn flex items-center gap-1.5"
+                    style={{ padding: "4px 10px", borderRadius: 6, fontSize: 12, color: C.cyan, borderColor: C.cyan }}>
+                    <Video size={12} /> Live
+                  </button>
+                )}
               </div>
             </Panel>
           );
         })}
       </div>
+      {liveCam && (
+        <Suspense fallback={null}>
+          <LivePlayer camera={liveCam} onClose={() => setLiveCam(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }

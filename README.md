@@ -28,8 +28,8 @@ keys, those tabs flip to live automatically — no code change.
 | Tab | Source | Live wiring |
 |-----|--------|-------------|
 | Home | all systems (summary) | — |
-| Security | Home Assistant hub (Gemini alarm, GV doors) | via `hub` seam |
-| Climate | Home Assistant hub (Pro1 HVAC) | via `hub` seam |
+| Security | Home Assistant hub (Gemini alarm, GV doors) | ✅ built |
+| Climate | Home Assistant hub (Pro1 HVAC) | ✅ built |
 | **Bookings** | **Amilia** — rooms booked today | ✅ built |
 | **Members** | **Amilia** — counts, types, check-ins | ✅ built |
 | **Cameras** | **Hik-Connect** (EZVIZ Open Platform) | ✅ built |
@@ -41,8 +41,11 @@ keys, those tabs flip to live automatically — no code change.
 `src/SquareOneOps.jsx` keeps a clean separation between the two integration styles:
 
 1. **`hub`** — on-site/LAN devices (alarm, HVAC, doors). No clean cloud API, so an
-   on-site Home Assistant instance adapts all three and exposes one REST API. Every
-   device *action* flows through `hub`. (Still in preview; wire to your HA instance.)
+   on-site Home Assistant instance adapts all three and exposes one REST API.
+   `src/useHub.js` reads live state from `/api/hub/state` and routes every device
+   *action* through the proxy to Home Assistant (`server/providers/homeassistant.js`).
+   Optimistic locally; re-syncs from HA after each action. Falls back to preview
+   when HA isn't configured.
 
 2. **The backend proxy (`server/`)** — cloud SaaS reads (Amilia, Hik-Connect,
    ProCare). These have secret keys and block direct browser calls (CORS), so the
@@ -61,6 +64,17 @@ browser ──/api/amilia/...──▶ server/ (holds keys) ──▶ app.amilia
 Fill in the relevant section of `.env` (copied from `.env.example`) and restart the
 proxy. The matching tab flips from "sample" to "live" on the next refresh.
 
+### Home Assistant (alarm + HVAC + doors) — ready
+- In Home Assistant: Profile → Security → **Long-lived access tokens** → create one.
+- Set `HA_BASE_URL` (e.g. `http://homeassistant.local:8123`) and `HA_TOKEN`.
+- Map the dashboard's door/zone ids to your real HA `entity_id`s — either edit
+  `DEFAULT_HA_ENTITIES` in `server/config.js` or set `HA_ENTITIES` as a JSON string.
+- If your alarm panel needs a code to arm/disarm, set `HA_ALARM_CODE`.
+- Endpoints used: `GET /api/states/{id}` for state; `POST /api/services/{domain}/
+  {service}` for `lock.lock`/`unlock`, `alarm_control_panel.alarm_arm_away`/
+  `alarm_disarm`, `climate.set_temperature`. See `server/providers/homeassistant.js`.
+- The Security/Climate tabs then control real devices and reflect real state.
+
 ### Amilia (members + bookings) — ready
 - Make a dedicated service account in your Amilia org (its own email + password,
   in an "Integrations" permission group).
@@ -77,8 +91,9 @@ proxy. The matching tab flips from "sample" to "live" on the next refresh.
 - Endpoints used: `token/get` (7-day token, cached, honors `areaDomain`),
   `device/list` (status), `device/capture` (snapshot), `live/address/get` (HLS).
   See `server/providers/hik.js`.
-- Live video: the `/api/hik/cameras/:id/live` endpoint returns an HLS URL you can
-  drop into a `<video>` with hls.js. (Camera tiles currently show snapshots.)
+- Live video: camera tiles show snapshots; clicking a tile (or its "Live" button)
+  opens an HLS player (`src/LivePlayer.jsx`, lazy-loaded) backed by
+  `/api/hik/cameras/:id/live`. Works once Hik is configured and the camera is online.
 
 ### ProCare (ELC) — needs access confirmation first
 - ProCare does **not** publish a broadly-available public API. Ask your ProCare rep

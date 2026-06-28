@@ -1,5 +1,29 @@
 import "dotenv/config";
 
+// Maps the dashboard's door/zone/alarm ids to Home Assistant entity_ids.
+// Override the whole thing by setting HA_ENTITIES to a JSON string of this shape.
+const DEFAULT_HA_ENTITIES = {
+  alarm: "alarm_control_panel.squareone",
+  doors: {
+    main: { name: "Main Entrance", entity: "lock.main_entrance" },
+    med:  { name: "Medical",        entity: "lock.medical" },
+    fit:  { name: "Fitness",        entity: "lock.fitness" },
+    elc:  { name: "Early Learning", entity: "lock.early_learning" },
+  },
+  zones: {
+    med: { name: "Medical",        entity: "climate.medical" },
+    elc: { name: "Early Learning", entity: "climate.early_learning" },
+    fit: { name: "Fitness",        entity: "climate.fitness" },
+    off: { name: "Offices",        entity: "climate.offices" },
+  },
+};
+
+function parseEntities(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); }
+  catch { console.warn("HA_ENTITIES is not valid JSON — using defaults"); return null; }
+}
+
 // All secrets come from environment variables (see .env.example). Nothing is
 // hardcoded and nothing reaches the browser bundle. A provider is considered
 // "configured" only when its required vars are present.
@@ -39,6 +63,21 @@ export const config = {
     apiKey: process.env.PROCARE_API_KEY || "",
     get configured() {
       return Boolean(this.baseUrl && this.apiKey);
+    },
+  },
+
+  // The on-site hub: Home Assistant adapts the LAN devices (Gemini alarm,
+  // Pro1 HVAC, GV-Access doors) and exposes one REST API.
+  // Create a long-lived access token in HA: Profile -> Security -> Long-lived
+  // access tokens. Then map your real entity_ids via HA_ENTITIES (JSON) or edit
+  // the defaults below.
+  homeassistant: {
+    baseUrl: process.env.HA_BASE_URL || "", // e.g. http://homeassistant.local:8123
+    token: process.env.HA_TOKEN || "",
+    alarmCode: process.env.HA_ALARM_CODE || "", // only if your alarm panel requires one
+    entities: parseEntities(process.env.HA_ENTITIES) || DEFAULT_HA_ENTITIES,
+    get configured() {
+      return Boolean(this.baseUrl && this.token);
     },
   },
 };
