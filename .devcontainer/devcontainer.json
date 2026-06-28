@@ -1,0 +1,15 @@
+{
+  "name": "SquareOne Dashboard",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
+  "forwardPorts": [5173, 8787],
+  "portsAttributes": {
+    "5173": { "label": "Dashboard (web)" },
+    "8787": { "label": "API proxy" }
+  },
+  "postCreateCommand": "npm install",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint"]
+    }
+  }
+}
