@@ -39,7 +39,8 @@ sign-in, enforces roles, and records an audit log of who did what. See
 | **Members** | **Amilia** — counts, types, check-ins | ✅ built |
 | **Cameras** | **Hik-Connect** (EZVIZ Open Platform) | ✅ built |
 | **ELC** | **ProCare** — attendance, staff ratios | ⚠️ needs API access |
-| Routines / Automation / Alerts / Assistant | derived | — |
+| **Assistant** | **Claude agent** — natural-language campus control | ✅ built |
+| Routines / Automation / Alerts | derived | — |
 
 ## Architecture: two kinds of system, two seams
 
@@ -79,6 +80,18 @@ proxy. The matching tab flips from "sample" to "live" on the next refresh.
   {service}` for `lock.lock`/`unlock`, `alarm_control_panel.alarm_arm_away`/
   `alarm_disarm`, `climate.set_temperature`. See `server/providers/homeassistant.js`.
 - The Security/Climate tabs then control real devices and reflect real state.
+
+### Built-in AI assistant — ready
+- Set `ANTHROPIC_API_KEY` (from console.anthropic.com). The **Assistant** tab then
+  understands plain English and takes real actions.
+- It runs a Claude (`claude-opus-4-8`) tool-use loop server-side
+  (`server/providers/assistant.js`) with tools for lock/unlock, arm/disarm, set
+  temperature, emergency lockdown, and reading campus status. The API key stays
+  server-side; the browser only posts the chat history to `/api/assistant`.
+- Actions only physically happen when **Home Assistant** is also configured;
+  otherwise the agent says the hub isn't connected. Every action it takes is
+  written to the `audit_log`. Without an Anthropic key the tab falls back to
+  simple keyword matching, so it still works in preview.
 
 ### Amilia (members + bookings) — ready
 - Make a dedicated service account in your Amilia org (its own email + password,
