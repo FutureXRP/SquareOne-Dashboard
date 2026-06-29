@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { X, Loader2 } from "lucide-react";
+import { apiFetch } from "./lib/api.js";
 
 const C = { bg: "#0B0F14", panel: "#131A22", border: "#243140", text: "#E8EDF2", mid: "#92A2B3", red: "#E0564B", cyan: "#52BECF" };
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
@@ -23,7 +24,7 @@ export function LivePlayer({ camera, onClose }) {
 
     (async () => {
       try {
-        const r = await fetch(`/api/hik/cameras/${camera.id}/live`).then((res) => res.json());
+        const r = await apiFetch(`/api/hik/cameras/${camera.id}/live`).then((res) => res.json());
         const url = r?.data?.url;
         if (!url) throw new Error(r?.message || "No live stream URL returned.");
         if (cancelled) return;

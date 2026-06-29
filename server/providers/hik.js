@@ -1,27 +1,15 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
+import { getCachedToken, setCachedToken } from "../tokenStore.js";
 
 export const hikRouter = Router();
 
 /*
   Hik-Connect cameras via the EZVIZ Open Platform (open.ys7.com / open.ezvizlife.com).
-  Hik-Connect and EZVIZ share Hikvision's cloud; the EZVIZ Open Platform is the
-  developer API that serves Hik-Connect end-user accounts.
-
-  SETUP (one-time):
-    1. Register a developer account at open.ezvizlife.com (international) or
-       open.ys7.com — MATCH THE REGION/COUNTRY of the account that owns the cameras.
-    2. Create an application -> it gives you an appKey + appSecret.
-    3. Put them in .env as HIK_APP_KEY / HIK_APP_SECRET.
-
-  Notes baked into the code below:
-    - All endpoints are POST, form-encoded, and take accessToken as a form param.
-    - Token lives 7 days; we cache it.
-    - token/get returns an `areaDomain` — we MUST use that domain for every later
-      call (region redirection), else device lists come back empty.
+  See .env.example for setup. All endpoints are POST, form-encoded, and take
+  accessToken as a form param. The 7-day token (and its areaDomain) is cached via
+  tokenStore so it survives serverless invocations.
 */
-
-let tokenCache = { accessToken: "", areaDomain: "", expireAt: 0 };
 
 function form(obj) {
   const p = new URLSearchParams();
@@ -29,14 +17,13 @@ function form(obj) {
   return p.toString();
 }
 
-async function ezvizPost(path, params, useAreaDomain = true) {
-  const base = useAreaDomain && tokenCache.areaDomain ? tokenCache.areaDomain : config.hik.baseUrl;
-  const body = await http(`${base}${path}`, {
+// base must be the areaDomain for everything except the token call.
+async function ezvizPost(path, params, base) {
+  const body = await http(`${base || config.hik.baseUrl}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form(params),
   });
-  // EZVIZ wraps everything: { code: "200", msg, data }. code !== "200" is an error.
   if (body && body.code && body.code !== "200") {
     throw new Error(`EZVIZ ${path} -> code ${body.code}: ${body.msg}`);
   }
@@ -44,33 +31,29 @@ async function ezvizPost(path, params, useAreaDomain = true) {
 }
 
 async function getToken() {
-  const now = Date.now();
-  if (tokenCache.accessToken && now < tokenCache.expireAt - 60_000) return tokenCache;
+  const cached = await getCachedToken("hik");
+  if (cached) return { accessToken: cached.token, areaDomain: cached.meta.areaDomain || config.hik.baseUrl };
   const data = await ezvizPost(
     "/api/lapp/token/get",
     { appKey: config.hik.appKey, appSecret: config.hik.appSecret },
-    false // token call uses the base host, not areaDomain
+    config.hik.baseUrl // token call uses the base host, not areaDomain
   );
-  tokenCache = {
-    accessToken: data.accessToken,
-    areaDomain: data.areaDomain || config.hik.baseUrl,
-    // expireTime is an absolute epoch-ms; fall back to ~6.5 days if missing.
-    expireAt: data.expireTime || now + 6.5 * 24 * 3600 * 1000,
-  };
-  return tokenCache;
+  const areaDomain = data.areaDomain || config.hik.baseUrl;
+  const expireAt = data.expireTime || Date.now() + 6.5 * 24 * 3600 * 1000;
+  await setCachedToken("hik", "default", data.accessToken, { areaDomain }, expireAt);
+  return { accessToken: data.accessToken, areaDomain };
 }
 
 // List cameras with online status. status: 1 = online, 0 = offline.
 hikRouter.get(
   "/cameras",
   guard("hik", async () => {
-    const { accessToken } = await getToken();
+    const { accessToken, areaDomain } = await getToken();
     const all = [];
     let pageStart = 0;
     const pageSize = 50;
-    // Paginate device/list. Response.data is an array of devices.
     for (let i = 0; i < 20; i++) {
-      const data = await ezvizPost("/api/lapp/device/list", { accessToken, pageStart, pageSize });
+      const data = await ezvizPost("/api/lapp/device/list", { accessToken, pageStart, pageSize }, areaDomain);
       const list = Array.isArray(data) ? data : [];
       all.push(...list);
       if (list.length < pageSize) break;
@@ -80,39 +63,43 @@ hikRouter.get(
       id: d.deviceSerial,
       name: d.deviceName || d.deviceSerial,
       online: Number(d.status) === 1,
-      recording: Number(d.status) === 1, // EZVIZ doesn't expose a simple "recording" flag here
-      motion: "—", // motion/last-event needs the alarm API; left out of the basic list
+      recording: Number(d.status) === 1,
+      motion: "—",
     }));
   })
 );
 
-// Snapshot: returns a temporary picUrl from EZVIZ; we redirect the browser to it.
+// Snapshot: fetch the temporary picUrl server-side and stream the JPEG back, so it
+// works behind auth (an <img> can't send the bearer token) and avoids CORS.
 hikRouter.get(
   "/cameras/:id/snapshot.jpg",
   guard("hik", async (req, res) => {
-    const { accessToken } = await getToken();
-    const data = await ezvizPost("/api/lapp/device/capture", {
-      accessToken,
-      deviceSerial: req.params.id,
-      channelNo: 1,
-    });
+    const { accessToken, areaDomain } = await getToken();
+    const data = await ezvizPost(
+      "/api/lapp/device/capture",
+      { accessToken, deviceSerial: req.params.id, channelNo: 1 },
+      areaDomain
+    );
     if (!data?.picUrl) throw new Error("no picUrl returned (camera may be offline)");
-    res.redirect(data.picUrl); // picUrl is a temporary signed JPEG URL
+    const img = await fetch(data.picUrl);
+    if (!img.ok) throw new Error(`snapshot fetch failed: ${img.status}`);
+    const buf = Buffer.from(await img.arrayBuffer());
+    res.setHeader("Content-Type", img.headers.get("content-type") || "image/jpeg");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(buf);
   })
 );
 
-// Bonus: HLS live stream URL for embedding in a browser (<video> + hls.js).
+// HLS live stream URL for the browser player.
 hikRouter.get(
   "/cameras/:id/live",
-  guard("hik", async () => {
-    const { accessToken } = await getToken();
-    const data = await ezvizPost("/api/lapp/live/address/get", {
-      accessToken,
-      deviceSerial: req.params.id,
-      channelNo: 1,
-      protocol: 2, // 2 = HLS (verify enum against your console docs)
-      quality: 1,
-    });
+  guard("hik", async (req) => {
+    const { accessToken, areaDomain } = await getToken();
+    const data = await ezvizPost(
+      "/api/lapp/live/address/get",
+      { accessToken, deviceSerial: req.params.id, channelNo: 1, protocol: 2, quality: 1 },
+      areaDomain
+    );
     return { url: data?.url, expireTime: data?.expireTime };
   })
 );

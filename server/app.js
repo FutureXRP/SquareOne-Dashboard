@@ -1,0 +1,38 @@
+import express from "express";
+import cors from "cors";
+import { config } from "./config.js";
+import { requireAuth, authEnabled } from "./auth.js";
+import { amiliaRouter } from "./providers/amilia.js";
+import { hikRouter } from "./providers/hik.js";
+import { procareRouter } from "./providers/procare.js";
+import { hubRouter } from "./providers/homeassistant.js";
+
+/*
+  The Express app, shared by local dev (server/index.js -> listen) and Vercel
+  (api/[...path].js -> exported as the serverless handler).
+*/
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Health + which integrations are configured (drives the UI status bar). Open.
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    authEnabled,
+    configured: {
+      hub: config.homeassistant.configured,
+      amilia: config.amilia.configured,
+      hik: config.hik.configured,
+      procare: config.procare.configured,
+    },
+  });
+});
+
+// Everything below requires a signed-in user when Supabase auth is enabled.
+app.use("/api/amilia", requireAuth, amiliaRouter);
+app.use("/api/hik", requireAuth, hikRouter);
+app.use("/api/procare", requireAuth, procareRouter);
+app.use("/api/hub", requireAuth, hubRouter);
+
+export default app;

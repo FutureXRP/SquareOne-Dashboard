@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { apiFetch } from "./lib/api.js";
 
 /*
   The on-site hub (alarm / HVAC / doors).
@@ -41,13 +42,13 @@ export function useHub(pushLog) {
   const sync = useCallback(async () => {
     let on = false;
     try {
-      const health = await fetch("/api/health").then((r) => r.json());
+      const health = await apiFetch("/api/health").then((r) => r.json());
       on = Boolean(health.configured?.hub);
     } catch { on = false; }
     setConnected(on);
     if (!on) return;
     try {
-      const r = await fetch("/api/hub/state").then((res) => res.json());
+      const r = await apiFetch("/api/hub/state").then((res) => res.json());
       if (r.ok && r.data) {
         if (r.data.doors?.length) setDoors(r.data.doors);
         if (r.data.alarm) setAlarm(r.data.alarm);
@@ -65,7 +66,7 @@ export function useHub(pushLog) {
   const send = useCallback(async (path, body) => {
     if (!connected) return;
     try {
-      const r = await fetch(`/api/hub/${path}`, {
+      const r = await apiFetch(`/api/hub/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),

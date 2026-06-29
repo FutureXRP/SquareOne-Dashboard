@@ -4,9 +4,10 @@ import {
   Clock, Bell, Terminal, ChevronUp, ChevronDown, Send, Power,
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
-  DoorOpen, Building2, TrendingUp,
+  DoorOpen, Building2, TrendingUp, LogOut,
 } from "lucide-react";
 import { useDashboardData } from "./useDashboardData.js";
+import { apiFetch } from "./lib/api.js";
 import { useHub } from "./useHub.js";
 // Lazy so hls.js (the bulk of the bundle) only loads when a live view is opened.
 const LivePlayer = lazy(() => import("./LivePlayer.jsx").then((m) => ({ default: m.LivePlayer })));
@@ -107,7 +108,7 @@ const MOCK_ELC = {
   unreadMessages: 4,
 };
 
-export default function SquareOneOps() {
+export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}) {
   const [tab, setTab] = useState("home");
 
   const [log, setLog] = useState([]);
@@ -170,7 +171,10 @@ export default function SquareOneOps() {
               <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>Operations Center</div>
             </div>
           </div>
-          <ClockReadout />
+          <div className="flex items-center gap-4">
+            {authEnabled && user && <AccountChip user={user} role={role} onSignOut={onSignOut} />}
+            <ClockReadout />
+          </div>
         </header>
 
         <ConnectionBar connected={{ hub: hubConnected, ...connected }} onReload={() => { reload(); reloadHub(); }} />
@@ -567,14 +571,7 @@ function Cameras({ cameras, snapshotUrl, liveEnabled }) {
                 style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default" }}>
                 <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
                   display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
-                  {snap ? (
-                    <img src={snap} alt={c.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  ) : (
-                    <div className="flex flex-col items-center gap-1" style={{ color: C.dim, fontFamily: mono, fontSize: 12 }}>
-                      <Video size={22} color={c.online ? C.dim : C.red} />
-                      {c.online ? "feed via Hik-Connect" : "camera offline"}
-                    </div>
-                  )}
+                  <Snapshot path={snap} name={c.name} online={c.online} />
                   {c.recording && (
                     <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
                       <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
@@ -829,6 +826,52 @@ function Assistant({ hub, doors, zones, alarm }) {
 
 function Empty({ text }) {
   return <div style={{ color: C.dim, fontSize: 13, fontStyle: "italic", padding: "6px 0" }}>{text}</div>;
+}
+
+// Signed-in user + role + sign out, shown in the masthead when auth is on.
+function AccountChip({ user, role, onSignOut }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div style={{ textAlign: "right" }}>
+        <div style={{ fontSize: 12.5, color: C.text, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</div>
+        {role && <div style={{ fontSize: 10.5, color: C.dim, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1 }}>{role}</div>}
+      </div>
+      <button onClick={onSignOut} className="so-btn flex items-center gap-1.5" title="Sign out"
+        style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12, color: C.mid }}>
+        <LogOut size={13} />
+      </button>
+    </div>
+  );
+}
+
+// Camera snapshot loaded through the authed fetch (an <img> can't send the JWT),
+// turned into an object URL. Falls back to a placeholder when no path / on error.
+function Snapshot({ path, name, online }) {
+  const [src, setSrc] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!path) return;
+    let url, cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(path);
+        if (!res.ok) throw new Error(String(res.status));
+        const blob = await res.blob();
+        if (cancelled) return;
+        url = URL.createObjectURL(blob);
+        setSrc(url);
+      } catch { if (!cancelled) setFailed(true); }
+    })();
+    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
+  }, [path]);
+
+  if (src) return <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
+  return (
+    <div className="flex flex-col items-center gap-1" style={{ color: C.dim, fontFamily: mono, fontSize: 12 }}>
+      <Video size={22} color={online ? C.dim : C.red} />
+      {!online ? "camera offline" : failed ? "snapshot unavailable" : path ? "loading…" : "feed via Hik-Connect"}
+    </div>
+  );
 }
 
 // "Amilia · live" / "Amilia · sample" tag for a panel header.

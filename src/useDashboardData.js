@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { apiJson as getJson } from "./lib/api.js";
 
 /*
   One hook that feeds the cloud tabs (Bookings/Members/Cameras/ELC).
@@ -7,14 +8,9 @@ import { useState, useEffect, useCallback } from "react";
   fetches live data for the ones that are. Anything not configured — or any failed
   fetch — falls back to the sample data passed in, so the UI always renders.
 
+  Requests carry the Supabase JWT (via apiJson) so the backend can enforce roles.
   Live wiring happens entirely server-side (server/*). The browser never sees a key.
 */
-
-async function getJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
-  return res.json();
-}
 
 // Proxy responses are { ok, configured, provider, data }. Unwrap to data or null.
 function unwrap(envelope) {

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
+import { logAudit } from "../auth.js";
 
 export const hubRouter = Router();
 
@@ -75,38 +76,41 @@ hubRouter.get(
 );
 
 /* ----------------------------- actions ----------------------------- */
-function action(handler) {
+// Wrap a hub action: run it, then write an audit entry (who did what).
+function action(name, handler) {
   return guard("homeassistant", async (req) => {
-    await handler(req.body || {});
+    const body = req.body || {};
+    await handler(body);
+    logAudit(req, `hub.${name}`, body.id || body.zoneId || null, body);
     return { applied: true };
   });
 }
 
-hubRouter.post("/lock",   action(async ({ id }) => callService("lock", "lock",   { entity_id: doorEntity(id) })));
-hubRouter.post("/unlock", action(async ({ id }) => callService("lock", "unlock", { entity_id: doorEntity(id) })));
+hubRouter.post("/lock",   action("lock",   async ({ id }) => callService("lock", "lock",   { entity_id: doorEntity(id) })));
+hubRouter.post("/unlock", action("unlock", async ({ id }) => callService("lock", "unlock", { entity_id: doorEntity(id) })));
 
-hubRouter.post("/lockAll", action(async () => {
+hubRouter.post("/lockAll", action("lockAll", async () => {
   const ids = Object.values(ha().entities.doors || {}).map((d) => d.entity).filter(Boolean);
   await callService("lock", "lock", { entity_id: ids });
 }));
-hubRouter.post("/unlockAll", action(async () => {
+hubRouter.post("/unlockAll", action("unlockAll", async () => {
   const ids = Object.values(ha().entities.doors || {}).map((d) => d.entity).filter(Boolean);
   await callService("lock", "unlock", { entity_id: ids });
 }));
 
-hubRouter.post("/arm", action(async ({ mode }) => {
+hubRouter.post("/arm", action("arm", async ({ mode }) => {
   const service = mode === "armed_home" ? "alarm_arm_home" : "alarm_arm_away";
   const data = { entity_id: ha().entities.alarm };
   if (ha().alarmCode) data.code = ha().alarmCode;
   await callService("alarm_control_panel", service, data);
 }));
-hubRouter.post("/disarm", action(async () => {
+hubRouter.post("/disarm", action("disarm", async () => {
   const data = { entity_id: ha().entities.alarm };
   if (ha().alarmCode) data.code = ha().alarmCode;
   await callService("alarm_control_panel", "alarm_disarm", data);
 }));
 
-hubRouter.post("/setTemp", action(async ({ zoneId, temperature }) => {
+hubRouter.post("/setTemp", action("setTemp", async ({ zoneId, temperature }) => {
   await callService("climate", "set_temperature", {
     entity_id: zoneEntity(zoneId),
     temperature: Math.max(60, Math.min(85, Number(temperature))),
@@ -114,7 +118,7 @@ hubRouter.post("/setTemp", action(async ({ zoneId, temperature }) => {
 }));
 
 // Emergency: lock every door and arm away in one call.
-hubRouter.post("/lockdown", action(async () => {
+hubRouter.post("/lockdown", action("lockdown", async () => {
   const ids = Object.values(ha().entities.doors || {}).map((d) => d.entity).filter(Boolean);
   await callService("lock", "lock", { entity_id: ids });
   const data = { entity_id: ha().entities.alarm };

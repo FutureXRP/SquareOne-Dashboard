@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
+import { getCachedToken, setCachedToken } from "../tokenStore.js";
 
 export const amiliaRouter = Router();
 
@@ -21,19 +22,21 @@ export const amiliaRouter = Router();
   Pagination envelope on list endpoints:  { Items: [...], Paging: { TotalCount, Next } }
 */
 
-let jwtCache = "";
-
 async function getJwt() {
   if (config.amilia.jwt) return config.amilia.jwt;
-  if (jwtCache) return jwtCache;
+  const scope = config.amilia.orgId || "default";
+  const cached = await getCachedToken("amilia", scope);
+  if (cached) return cached.token;
   const basic = Buffer.from(`${config.amilia.email}:${config.amilia.password}`).toString("base64");
   // The authenticate call has NO language segment and returns the raw JWT.
   const token = await http(`${config.amilia.baseUrl}/api/V3/authenticate`, {
     headers: { Authorization: `Basic ${basic}`, Accept: "application/json" },
   });
-  jwtCache = typeof token === "string" ? token.replace(/^"|"$/g, "") : token?.Token || token?.token;
-  if (!jwtCache) throw new Error("authenticate did not return a JWT");
-  return jwtCache;
+  const jwt = typeof token === "string" ? token.replace(/^"|"$/g, "") : token?.Token || token?.token;
+  if (!jwt) throw new Error("authenticate did not return a JWT");
+  // Amilia JWTs last ~1 year; cache for 300 days.
+  await setCachedToken("amilia", scope, jwt, {}, Date.now() + 300 * 24 * 3600 * 1000);
+  return jwt;
 }
 
 function orgBase() {

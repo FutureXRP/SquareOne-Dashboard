@@ -1,8 +1,13 @@
 # Deployment & multi-account plan (Vercel + Supabase)
 
-This is the target architecture for hosting SquareOne on Vercel with multi-user
-login via Supabase. Nothing here is wired yet — it's the plan to review before we
-restructure the working local app.
+Architecture for hosting SquareOne on Vercel with multi-user login via Supabase.
+
+**Status: wired.** The code is in place — Supabase auth + roles + login screen,
+the backend runs as a Vercel function (`api/[...path].js` → `server/app.js`),
+token caching persists via Supabase, and `/api` calls are JWT-gated with an audit
+log. It all still runs locally with no Supabase keys (open mode). What's left is
+operational: create the Supabase + Vercel projects, set env vars, and (for HA) the
+Cloudflare Tunnel. Steps below.
 
 ## The one hard constraint: Home Assistant is on your LAN
 

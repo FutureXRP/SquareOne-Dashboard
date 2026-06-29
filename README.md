@@ -23,6 +23,11 @@ npm run build      # production build of the frontend into dist/
 realistic sample data and the status bar marks each integration "sample". As you add
 keys, those tabs flip to live automatically — no code change.
 
+**Multi-account login is optional too.** With no Supabase keys set, the app runs open
+(no login) — ideal for local dev. Add the Supabase keys (below) and it requires
+sign-in, enforces roles, and records an audit log of who did what. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full hosted setup.
+
 ## Tabs
 
 | Tab | Source | Live wiring |
@@ -102,7 +107,39 @@ proxy. The matching tab flips from "sample" to "live" on the next refresh.
   path/field mapping in `server/providers/procare.js` to match what they give you.
 - Until then this tab stays on sample data and the UI says so.
 
+## Deploy free (Vercel + Supabase + Cloudflare Tunnel)
+
+All three have free tiers. Full detail in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md);
+the short version:
+
+1. **Supabase** (free) — create a project, run `supabase/schema.sql` in the SQL editor.
+   Copy Project URL + `anon` key + `service_role` key.
+2. **Vercel** (free Hobby) — import this GitHub repo. Vercel auto-detects Vite; the
+   `api/[...path].js` function serves the backend (`vercel.json` is already set).
+   Add env vars in Vercel (Project → Settings → Environment Variables): all the keys
+   from `.env.example` you use, including `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+   `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+3. **Home Assistant over the internet** — Vercel can't see your LAN, so expose HA with
+   a free **Cloudflare Tunnel**:
+   - Install `cloudflared` on a machine on the HA network.
+   - `cloudflared tunnel login`, then `cloudflared tunnel create squareone-ha`.
+   - Route a hostname to HA: `cloudflared tunnel route dns squareone-ha ha.yourdomain.com`
+     and point the tunnel’s ingress at `http://homeassistant.local:8123`.
+   - Run it (`cloudflared tunnel run squareone-ha`, or install as a service).
+   - Set `HA_BASE_URL=https://ha.yourdomain.com` in Vercel. (Alternatively, Nabu Casa
+     Cloud gives you a hosted HTTPS URL for ~$6.50/mo with no tunnel to manage.)
+4. **First user / roles** — sign up via the login screen, then in Supabase add a row to
+   `locations`, and a row to `user_locations` granting your user `admin` for that
+   location. Invite staff and assign `manager` / `staff`. Enable MFA for admins.
+5. **Deploy** — push to `main`; Vercel builds automatically.
+
 ## Security notes
-- No vendor keys live in this repo or the browser bundle. They stay server-side.
+- No vendor keys live in this repo or the browser bundle. They stay server-side
+  (Vercel env vars / Supabase service role); only the public `VITE_SUPABASE_*` and the
+  anon key reach the browser, which is by design.
 - `.env` is git-ignored. The proxy reads keys from its own environment.
-- Don't paste credentials into chat or commits — only into your local `.env`.
+- Don't paste credentials into chat or commits — only into your local `.env` or the
+  Vercel dashboard.
+- With auth on, every `/api` call requires a valid Supabase session; hub actions are
+  written to the `audit_log`. Turn on MFA for admin accounts since the app can control
+  physical doors and the alarm.
