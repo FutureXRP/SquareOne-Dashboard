@@ -209,7 +209,7 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
         {tab === "automation" && <Automation />}
         {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} />}
-        {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} />}
+        {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
       </div>
     </div>
   );
@@ -750,13 +750,43 @@ function Alerts({ zones, doors, cameras, elc }) {
 }
 
 /* ----------------------------- ASSISTANT ----------------------------- */
-function Assistant({ hub, doors, zones, alarm }) {
+function Assistant({ hub, doors, zones, alarm, aiEnabled, reloadHub }) {
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState([
-    { role: "sys", text: "Type a command. Try: “lock the campus”, “set fitness to 70”, “is everything secure?”, “open medical”." },
+    { role: "sys", text: aiEnabled
+      ? "AI assistant ready. Ask in plain English: “lock up for the night”, “set the early learning room to 70”, “is the campus secure?”, “unlock the medical door”."
+      : "Type a command. Try: “lock the campus”, “set fitness to 70”, “is everything secure?”, “open medical”." },
   ]);
   const endRef = useRef(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [history]);
+
+  // AI mode: send the conversation to the backend agent, which executes real
+  // campus actions via Home Assistant and returns a reply + the actions taken.
+  const sendToAgent = async (text) => {
+    const convo = [...history, { role: "you", text }]
+      .filter((m) => m.role === "you" || m.role === "bot")
+      .map((m) => ({ role: m.role === "you" ? "user" : "assistant", content: m.text }));
+    setHistory((h) => [...h, { role: "you", text }]);
+    setBusy(true);
+    try {
+      const r = await apiFetch("/api/assistant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: convo }),
+      }).then((res) => res.json());
+      if (r.ok) {
+        setHistory((h) => [...h, { role: "bot", text: r.reply }]);
+        if (r.actions?.length) reloadHub?.(); // re-sync hub state after any actions
+      } else {
+        setHistory((h) => [...h, { role: "bot", text: r.message || "Assistant unavailable." }]);
+      }
+    } catch (e) {
+      setHistory((h) => [...h, { role: "bot", text: `Error reaching the assistant: ${e.message}` }]);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const respond = (text) => {
     const q = text.toLowerCase().trim();
@@ -797,9 +827,15 @@ function Assistant({ hub, doors, zones, alarm }) {
     return say("I didn't catch that. Try: “lock the campus”, “set fitness to 70”, “is everything secure?”, or “open medical”.");
   };
 
-  const submit = () => { if (!input.trim()) return; respond(input); setInput(""); };
+  const submit = () => {
+    const text = input.trim();
+    if (!text || busy) return;
+    setInput("");
+    if (aiEnabled) sendToAgent(text);
+    else respond(text);
+  };
   return (
-    <Panel title="Assistant" accent={C.cyan}>
+    <Panel title={aiEnabled ? "Assistant · AI" : "Assistant"} accent={C.cyan}>
       <div style={{ maxHeight: 380, overflowY: "auto", marginBottom: 12 }}>
         {history.map((m, i) => (
           <div key={i} style={{ margin: "8px 0", display: "flex", justifyContent: m.role === "you" ? "flex-end" : "flex-start" }}>
@@ -816,9 +852,9 @@ function Assistant({ hub, doors, zones, alarm }) {
       </div>
       <div className="flex gap-2">
         <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="Lock the campus…"
-          style={{ flex: 1, padding: "11px 14px", borderRadius: 8, background: C.panel2, border: `1px solid ${C.border}`, color: C.text, fontSize: 14, outline: "none", fontFamily: sans }} />
-        <button onClick={submit} className="so-btn" style={{ padding: "0 16px", borderRadius: 8, color: C.cyan, borderColor: C.cyan }}><Send size={17} /></button>
+          placeholder={busy ? "Thinking…" : "Lock the campus…"} disabled={busy}
+          style={{ flex: 1, padding: "11px 14px", borderRadius: 8, background: C.panel2, border: `1px solid ${C.border}`, color: C.text, fontSize: 14, outline: "none", fontFamily: sans, opacity: busy ? 0.6 : 1 }} />
+        <button onClick={submit} disabled={busy} className="so-btn" style={{ padding: "0 16px", borderRadius: 8, color: C.cyan, borderColor: C.cyan, opacity: busy ? 0.6 : 1 }}><Send size={17} /></button>
       </div>
     </Panel>
   );

@@ -6,6 +6,7 @@ import { amiliaRouter } from "./providers/amilia.js";
 import { hikRouter } from "./providers/hik.js";
 import { procareRouter } from "./providers/procare.js";
 import { hubRouter } from "./providers/homeassistant.js";
+import { assistantRouter } from "./providers/assistant.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -25,6 +26,7 @@ app.get("/api/health", (_req, res) => {
       amilia: config.amilia.configured,
       hik: config.hik.configured,
       procare: config.procare.configured,
+      assistant: config.anthropic.configured,
     },
   });
 });
@@ -34,5 +36,6 @@ app.use("/api/amilia", requireAuth, amiliaRouter);
 app.use("/api/hik", requireAuth, hikRouter);
 app.use("/api/procare", requireAuth, procareRouter);
 app.use("/api/hub", requireAuth, hubRouter);
+app.use("/api/assistant", requireAuth, assistantRouter);
 
 export default app;

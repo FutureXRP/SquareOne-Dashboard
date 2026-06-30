@@ -66,6 +66,15 @@ export const config = {
     },
   },
 
+  // The built-in assistant agent (Claude). Needs an Anthropic API key.
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY || "",
+    model: process.env.ANTHROPIC_MODEL || "claude-opus-4-8",
+    get configured() {
+      return Boolean(this.apiKey);
+    },
+  },
+
   // The on-site hub: Home Assistant adapts the LAN devices (Gemini alarm,
   // Pro1 HVAC, GV-Access doors) and exposes one REST API.
   // Create a long-lived access token in HA: Profile -> Security -> Long-lived
