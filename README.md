@@ -3,6 +3,10 @@
 One dashboard for the whole campus: security & climate (on-site systems) plus the
 business side — room bookings, membership, cameras, and the Early Learning Center.
 
+> 👉 **New here? Read [STATUS.md](STATUS.md)** — current project status and the exact
+> checklist to complete the live implementation. This README covers how it's built
+> and how to run it.
+
 ## Run it
 
 ```bash
