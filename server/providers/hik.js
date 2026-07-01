@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
+import { requireAdmin } from "../auth.js";
 
 export const hikRouter = Router();
 
@@ -30,18 +31,47 @@ async function ezvizPost(path, params, base) {
   return body?.data;
 }
 
+// EZVIZ is region-partitioned. The account may live on any of these hosts; the
+// token/get call only succeeds on the right one, and its response tells us the
+// areaDomain to use for every later call. We try each host until one issues a
+// token, so the operator doesn't have to know their region up front.
+const TOKEN_HOSTS = () =>
+  [
+    config.hik.baseUrl,
+    "https://open.ezvizlife.com",
+    "https://isgpopen.ezvizlife.com",
+    "https://iusopen.ezviz.com",
+    "https://open.ys7.com",
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+// Force a fresh token by trying each regional host. Returns { accessToken, areaDomain, host }.
+async function fetchToken() {
+  const attempts = [];
+  for (const host of TOKEN_HOSTS()) {
+    try {
+      const data = await ezvizPost(
+        "/api/lapp/token/get",
+        { appKey: config.hik.appKey, appSecret: config.hik.appSecret },
+        host
+      );
+      if (data?.accessToken) {
+        const areaDomain = data.areaDomain || host;
+        const expireAt = data.expireTime || Date.now() + 6.5 * 24 * 3600 * 1000;
+        await setCachedToken("hik", "default", data.accessToken, { areaDomain, host }, expireAt);
+        return { accessToken: data.accessToken, areaDomain, host };
+      }
+      attempts.push(`${host}: no accessToken`);
+    } catch (e) {
+      attempts.push(`${host}: ${e.message}`);
+    }
+  }
+  throw new Error(`token/get failed on all hosts — ${attempts.join(" | ")}`);
+}
+
 async function getToken() {
   const cached = await getCachedToken("hik");
   if (cached) return { accessToken: cached.token, areaDomain: cached.meta.areaDomain || config.hik.baseUrl };
-  const data = await ezvizPost(
-    "/api/lapp/token/get",
-    { appKey: config.hik.appKey, appSecret: config.hik.appSecret },
-    config.hik.baseUrl // token call uses the base host, not areaDomain
-  );
-  const areaDomain = data.areaDomain || config.hik.baseUrl;
-  const expireAt = data.expireTime || Date.now() + 6.5 * 24 * 3600 * 1000;
-  await setCachedToken("hik", "default", data.accessToken, { areaDomain }, expireAt);
-  return { accessToken: data.accessToken, areaDomain };
+  return fetchToken();
 }
 
 // List cameras with online status. status: 1 = online, 0 = offline.
@@ -101,5 +131,40 @@ hikRouter.get(
       areaDomain
     );
     return { url: data?.url, expireTime: data?.expireTime };
+  })
+);
+
+/*
+  Admin-only diagnostics. Forces a fresh token (reports which regional host and
+  areaDomain worked) and lists devices. Never returns appKey/appSecret. Use this
+  to confirm the keys + region and see the exact device shape.
+*/
+hikRouter.get(
+  "/debug",
+  requireAdmin,
+  guard("hik", async () => {
+    const out = { hostsTried: TOKEN_HOSTS(), token: null, devices: null };
+    let areaDomain, accessToken;
+    try {
+      const t = await fetchToken();
+      accessToken = t.accessToken;
+      areaDomain = t.areaDomain;
+      out.token = { ok: true, host: t.host, areaDomain: t.areaDomain };
+    } catch (e) {
+      out.token = { ok: false, error: e.message };
+      return out;
+    }
+    try {
+      const data = await ezvizPost("/api/lapp/device/list", { accessToken, pageStart: 0, pageSize: 50 }, areaDomain);
+      const list = Array.isArray(data) ? data : [];
+      out.devices = {
+        count: list.length,
+        itemKeys: list[0] ? Object.keys(list[0]) : [],
+        list: list.map((d) => ({ deviceSerial: d.deviceSerial, deviceName: d.deviceName, status: d.status })),
+      };
+    } catch (e) {
+      out.devices = { ok: false, error: e.message };
+    }
+    return out;
   })
 );
