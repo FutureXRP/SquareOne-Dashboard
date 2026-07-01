@@ -26,6 +26,26 @@ export async function requireAuth(req, res, next) {
   next();
 }
 
+// Require the signed-in user to hold an 'admin' grant. Assumes requireAuth ran
+// first (so req.user is set). In open/local mode (no Supabase) this allows through.
+export async function requireAdmin(req, res, next) {
+  if (!authEnabled) return next();
+  if (!req.user) return res.status(401).json({ ok: false, message: "Not signed in." });
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("user_locations")
+      .select("role")
+      .eq("user_id", req.user.id)
+      .eq("role", "admin")
+      .limit(1);
+    if (error) throw error;
+    if (data && data.length) return next();
+    return res.status(403).json({ ok: false, message: "Admin role required for this endpoint." });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: `Role check failed: ${e.message}` });
+  }
+}
+
 // Best-effort audit entry. Never throws into the request path.
 export async function logAudit(req, action, target, detail) {
   if (!authEnabled || !req?.user) return;
