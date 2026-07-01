@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
+import { requireAdmin } from "../auth.js";
 
 export const amiliaRouter = Router();
 
@@ -49,6 +50,46 @@ async function get(path, jwt) {
     headers: { Authorization: `Bearer ${jwt}`, Accept: "application/json", "X-Amilia-Origin": "SquareOne-Dashboard" },
   });
 }
+
+/*
+  Admin-only field-verification endpoint. Returns the RAW shape of the Amilia
+  responses (field names + one sample record + paging) so we can confirm the exact
+  casing/nesting before trusting the mapping in /members/summary and /bookings.
+
+  GET /api/amilia/debug/raw?date=YYYY-MM-DD
+  Admin-gated (returns one member's data — treat the response as sensitive).
+*/
+amiliaRouter.get(
+  "/debug/raw",
+  requireAdmin,
+  guard("amilia", async (req) => {
+    const jwt = await getJwt();
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const keys = (o) => (o && typeof o === "object" && !Array.isArray(o) ? Object.keys(o) : []);
+    const unwrap = (r) => (r?.Items || (Array.isArray(r) ? r : []));
+
+    const memberships = await get("/memberships", jwt).catch((e) => ({ error: e.message }));
+    const mList = unwrap(memberships);
+
+    let persons = null;
+    if (mList[0]) {
+      const id = mList[0].Id ?? mList[0].id;
+      persons = await get(`/memberships/${id}/persons?page=1&perPage=1`, jwt).catch((e) => ({ error: e.message }));
+    }
+
+    const events = await get(`/events?from=${date}&to=${date}&showParticipants=true&showCanceled=false`, jwt)
+      .catch((e) => ({ error: e.message }));
+    const eList = unwrap(events);
+
+    return {
+      date,
+      orgBase: orgBase(),
+      memberships: { count: mList.length, itemKeys: keys(mList[0]), sample: mList[0] ?? null, paging: memberships?.Paging ?? null, error: memberships?.error },
+      membershipPersons: { itemKeys: keys(unwrap(persons)[0]), sample: unwrap(persons)[0] ?? null, paging: persons?.Paging ?? null, error: persons?.error },
+      events: { count: eList.length, itemKeys: keys(eList[0]), sample: eList[0] ?? null, paging: events?.Paging ?? null, error: events?.error },
+    };
+  })
+);
 
 // Membership summary. Each "membership" is a type/tier; per-type counts come from
 // the Paging.TotalCount of its persons list.
