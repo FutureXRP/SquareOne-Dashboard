@@ -191,30 +191,58 @@ amiliaRouter.get(
   guard("amilia", async (req) => {
     const jwt = await getJwt();
     const from = req.query.from || isoDay(0);
-    const to = req.query.to || isoDay(13);
+    const to = req.query.to || isoDay(89); // reservations are sparse — show a 90-day window
     let res = null;
     try { res = await get(`/reservations?from=${from}&to=${to}`, jwt); } catch { /* fall through to empty */ }
     const items = res?.Items || (Array.isArray(res) ? res : []) || [];
 
     const norm = items.map((r, i) => {
-      const start = r.Start || r.StartDate || r.StartDateTime || r.start;
-      const end = r.End || r.EndDate || r.EndDateTime || r.end;
+      const start = r.Start || r.StartDate || r.start;
+      const end = r.End || r.EndDate || r.end;
       return {
-        id: r.Id ?? r.id ?? i,
+        id: r.ReservationId ?? r.Id ?? i,
         _sort: start ? new Date(start).getTime() : 0,
         date: fmtDate(start),
-        start: fmtTime(start),
-        end: fmtTime(end),
-        room: r.LocationName || r.Location?.Name || r.ResourceName || r.Resource?.Name || r.FacilityName || "—",
-        activity: r.Name || r.Title || r.ActivityName || r.Description || r.Notes || "Reservation",
-        who: r.ContactName || r.AccountName || r.OwnerName || r.PersonName || r.ClientName || "",
-        party: r.Attendees ?? r.ParticipantCount ?? (Array.isArray(r.Participants) ? r.Participants.length : 0),
-        status: (r.Status || "confirmed").toString().toLowerCase(),
+        start: r.AllDay ? "All day" : fmtTime(start),
+        end: r.AllDay ? "" : fmtTime(end),
+        room: r.Location?.Name || r.LocationName || "—",
+        activity: r.Title || r.AdminBooking?.Name || r.Activity?.Name || "Reservation",
+        who: r.Client?.Name || r.Staff?.Name || "",
+        type: r.BookingType?.Name || r.Type || "",
+        color: r.BookingType?.Color || null,
+        status: r.IsCancelled ? "cancelled" : "confirmed",
       };
     });
     norm.sort((a, b) => a._sort - b._sort);
     norm.forEach((n) => delete n._sort);
     return norm;
+  })
+);
+
+// Facilities/locations, with today's opening hours. Always populated (13 rooms).
+amiliaRouter.get(
+  "/facilities",
+  guard("amilia", async () => {
+    const jwt = await getJwt();
+    let res = null;
+    try { res = await get("/locations", jwt); } catch { /* empty */ }
+    const items = res?.Items || (Array.isArray(res) ? res : []) || [];
+    const today = new Date().toLocaleDateString("en-US", { weekday: "long" });
+    const hm = (t) => {
+      if (!t) return "";
+      const [h, m] = t.split(":");
+      const H = Number(h);
+      return `${((H + 11) % 12) + 1}:${m} ${H >= 12 ? "PM" : "AM"}`;
+    };
+    return items.map((l) => {
+      const oh = (l.OpeningHours || []).find((h) => h.DayOfWeek === today);
+      return {
+        id: l.Id,
+        name: l.Name || l.FullName || "—",
+        description: l.Description || "",
+        hours: oh ? `${hm(oh.Start)} – ${hm(oh.End)}` : "Closed today",
+      };
+    });
   })
 );
 

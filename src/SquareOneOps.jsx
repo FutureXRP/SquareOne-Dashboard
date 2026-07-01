@@ -487,31 +487,53 @@ function Preset({ icon: Icon, label, onClick }) {
 
 /* ----------------------------- BOOKINGS (Amilia) ----------------------------- */
 function Bookings({ bookings, live }) {
-  const rooms = [...new Set(bookings.map((b) => b.room))];
+  const [facilities, setFacilities] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch("/api/amilia/facilities")
+      .then((r) => r.json())
+      .then((j) => { if (!cancelled && j.ok && Array.isArray(j.data)) setFacilities(j.data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const roomCount = facilities.length || new Set(bookings.map((b) => b.room)).size;
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-        <Stat label="Upcoming bookings" value={bookings.length} sub="next 14 days" icon={Calendar} color={C.cyan} />
-        <Stat label="Rooms / facilities" value={rooms.length} icon={Building2} color={C.cyan} />
+        <Stat label="Upcoming bookings" value={bookings.length} sub="next 90 days" icon={Calendar} color={C.cyan} />
+        <Stat label="Facilities" value={roomCount} icon={Building2} color={C.cyan} />
       </div>
       <Panel title="Upcoming Bookings" accent={C.cyan}
         right={<SourceTag live={live} name="Amilia" />}>
-      {bookings.length === 0 && <Empty text="No reservations in the next 14 days." />}
+      {bookings.length === 0 && <Empty text="No reservations in the next 90 days." />}
         {bookings.map((b) => (
           <div key={b.id} className="flex items-center gap-3" style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+            {b.color && <span style={{ width: 8, height: 8, borderRadius: 99, background: b.color, flexShrink: 0 }} />}
             {b.date && <span style={{ fontFamily: mono, color: C.mid, fontSize: 12.5, minWidth: 92 }}>{b.date}</span>}
-            <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 96 }}>{b.start}–{b.end}</span>
+            <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 96 }}>{b.start}{b.end ? `–${b.end}` : ""}</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14.5, fontWeight: 600 }}>{b.room}</div>
               <div style={{ fontSize: 12.5, color: C.dim }}>{b.activity}{b.who ? ` · ${b.who}` : ""}</div>
             </div>
             <span style={{ fontSize: 11, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1,
-              color: b.status === "confirmed" ? C.go : C.amber, minWidth: 76, textAlign: "right" }}>
+              color: b.status === "cancelled" ? C.red : C.go, minWidth: 76, textAlign: "right" }}>
               {b.status}
             </span>
           </div>
         ))}
       </Panel>
+      {facilities.length > 0 && (
+        <Panel title={`Facilities · ${facilities.length}`} accent={C.dim} right={<SourceTag live={live} name="Amilia" />}>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
+            {facilities.map((f) => (
+              <div key={f.id} style={{ padding: "8px 10px", background: C.panel2, borderRadius: 7, border: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</div>
+                <div style={{ fontSize: 12, color: C.mid, fontFamily: mono }}>{f.hours}</div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
