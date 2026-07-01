@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { ShieldCheck, Mail, Lock, Loader2 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
+import { BrandLogo } from "./BrandLogo.jsx";
 
 const C = {
   bg: "#0B0F14", panel: "#131A22", panel2: "#1A232E", border: "#243140", borderHi: "#33465A",
@@ -40,7 +41,7 @@ export function Login() {
     <div style={{ background: C.bg, color: C.text, fontFamily: sans, minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ width: "min(380px, 100%)" }}>
         <div className="flex items-center gap-3" style={{ marginBottom: 22 }}>
-          <div style={{ width: 30, height: 30, border: `2px solid ${C.cyan}`, borderRadius: 5 }} />
+          <BrandLogo size={32} fallbackColor={C.cyan} />
           <div>
             <div style={{ fontSize: 11, letterSpacing: 3, color: C.mid, fontFamily: mono, textTransform: "uppercase" }}>SquareOne</div>
             <div style={{ fontSize: 17, fontWeight: 700 }}>Operations Center</div>

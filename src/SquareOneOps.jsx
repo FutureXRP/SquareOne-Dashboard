@@ -12,6 +12,7 @@ const fmtMoney = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { maxim
 import { useDashboardData } from "./useDashboardData.js";
 import { apiFetch } from "./lib/api.js";
 import { useHub } from "./useHub.js";
+import { BrandLogo } from "./BrandLogo.jsx";
 // Lazy so hls.js (the bulk of the bundle) only loads when a live view is opened.
 const LivePlayer = lazy(() => import("./LivePlayer.jsx").then((m) => ({ default: m.LivePlayer })));
 
@@ -168,7 +169,7 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {/* Masthead */}
         <header className="flex items-center justify-between" style={{ padding: "20px 0 14px", borderBottom: `1px solid ${C.border}` }}>
           <div className="flex items-center gap-3">
-            <div style={{ width: 30, height: 30, border: `2px solid ${C.cyan}`, borderRadius: 5 }} />
+            <BrandLogo size={32} fallbackColor={C.cyan} />
             <div>
               <div style={{ fontSize: 11, letterSpacing: 3, color: C.mid, fontFamily: mono, textTransform: "uppercase" }}>SquareOne</div>
               <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>Operations Center</div>
