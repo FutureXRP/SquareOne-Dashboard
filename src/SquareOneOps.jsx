@@ -4,8 +4,11 @@ import {
   Clock, Bell, Terminal, ChevronUp, ChevronDown, Send, Power,
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
-  DoorOpen, Building2, TrendingUp, LogOut,
+  DoorOpen, Building2, TrendingUp, LogOut, DollarSign,
 } from "lucide-react";
+
+// Compact currency, e.g. 1575 -> "$1,575". Non-numbers pass through as "$0".
+const fmtMoney = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
 import { useDashboardData } from "./useDashboardData.js";
 import { apiFetch } from "./lib/api.js";
 import { useHub } from "./useHub.js";
@@ -311,7 +314,7 @@ function Home({ doors, zones, alarm, log, setTab, members, bookings, cameras, el
       <Panel title="At a Glance" accent={C.cyan}>
         <div className="grid grid-cols-2 gap-2">
           <Stat label="Members" value={members.total} sub={`${members.checkedInNow} here now`} icon={Users} color={C.cyan} />
-          <Stat label="Booked today" value={bookings.length} sub="rooms" icon={Calendar} color={C.cyan} />
+          <Stat label="Upcoming bookings" value={bookings.length} sub="next 14 days" icon={Calendar} color={C.cyan} />
           <Stat label="Cameras" value={`${camsOnline}/${cameras.length}`} sub="online" icon={Video} color={camsOnline === cameras.length ? C.go : C.amber} />
           <Stat label="ELC present" value={elc.childrenPresent} sub={`of ${elc.childrenEnrolled} enrolled`} icon={Baby} color={C.cyan} />
         </div>
@@ -485,27 +488,23 @@ function Preset({ icon: Icon, label, onClick }) {
 /* ----------------------------- BOOKINGS (Amilia) ----------------------------- */
 function Bookings({ bookings, live }) {
   const rooms = [...new Set(bookings.map((b) => b.room))];
-  const totalPeople = bookings.reduce((n, b) => n + b.party, 0);
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-        <Stat label="Bookings today" value={bookings.length} icon={Calendar} color={C.cyan} />
-        <Stat label="Rooms in use" value={rooms.length} icon={Building2} color={C.cyan} />
-        <Stat label="Expected guests" value={totalPeople} icon={Users} color={C.cyan} />
+        <Stat label="Upcoming bookings" value={bookings.length} sub="next 14 days" icon={Calendar} color={C.cyan} />
+        <Stat label="Rooms / facilities" value={rooms.length} icon={Building2} color={C.cyan} />
       </div>
-      <Panel title="Today's Room Schedule" accent={C.cyan}
+      <Panel title="Upcoming Bookings" accent={C.cyan}
         right={<SourceTag live={live} name="Amilia" />}>
-      {bookings.length === 0 && <Empty text="No bookings for today." />}
+      {bookings.length === 0 && <Empty text="No reservations in the next 14 days." />}
         {bookings.map((b) => (
           <div key={b.id} className="flex items-center gap-3" style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+            {b.date && <span style={{ fontFamily: mono, color: C.mid, fontSize: 12.5, minWidth: 92 }}>{b.date}</span>}
             <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 96 }}>{b.start}–{b.end}</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14.5, fontWeight: 600 }}>{b.room}</div>
-              <div style={{ fontSize: 12.5, color: C.dim }}>{b.activity}</div>
+              <div style={{ fontSize: 12.5, color: C.dim }}>{b.activity}{b.who ? ` · ${b.who}` : ""}</div>
             </div>
-            <span className="flex items-center gap-1.5" style={{ color: C.mid, fontFamily: mono, fontSize: 12.5, minWidth: 56 }}>
-              <Users size={13} />{b.party}
-            </span>
             <span style={{ fontSize: 11, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1,
               color: b.status === "confirmed" ? C.go : C.amber, minWidth: 76, textAlign: "right" }}>
               {b.status}
@@ -520,21 +519,27 @@ function Bookings({ bookings, live }) {
 /* ----------------------------- MEMBERS (Amilia) ----------------------------- */
 function Members({ members, live }) {
   const max = Math.max(1, ...members.byType.map((t) => t.count));
+  const revenue = members.projectedRevenue ?? members.byType.reduce((s, t) => s + (t.revenue || 0), 0);
+  const activePct = members.total ? Math.round((members.active / members.total) * 100) : 0;
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Total members" value={members.total} icon={Users} color={C.cyan} />
-        <Stat label="Active" value={members.active} sub={`${Math.round((members.active / members.total) * 100)}% of total`} icon={UserCheck} color={C.go} />
-        <Stat label="New this month" value={`+${members.newThisMonth}`} sub={`${members.cancelledThisMonth} cancelled`} icon={TrendingUp} color={C.go} />
-        <Stat label="Checked in now" value={members.checkedInNow} icon={DoorOpen} color={C.cyan} />
+        <Stat label="Active" value={members.active} sub={`${activePct}% of total`} icon={UserCheck} color={C.go} />
+        <Stat label="Projected revenue" value={fmtMoney(revenue)} sub="list price × active" icon={DollarSign} color={C.go} />
+        <Stat label="Membership plans" value={members.byType.length} icon={Building2} color={C.cyan} />
       </div>
       <Panel title="Membership by Type" accent={C.cyan}
         right={<SourceTag live={live} name="Amilia" />}>
         {members.byType.map((t) => (
           <div key={t.type} style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
-            <div className="flex items-center justify-between" style={{ fontSize: 13.5, marginBottom: 6 }}>
-              <span>{t.type}</span>
-              <span style={{ fontFamily: mono, color: C.mid }}>{t.count}</span>
+            <div className="flex items-center justify-between gap-3" style={{ fontSize: 13.5, marginBottom: 6 }}>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.type}</span>
+              <span className="flex items-center gap-3" style={{ fontFamily: mono, flexShrink: 0 }}>
+                {t.price != null && <span style={{ color: C.dim, fontSize: 12 }}>{fmtMoney(t.price)} ea</span>}
+                {t.revenue != null && <span style={{ color: C.go }}>{fmtMoney(t.revenue)}</span>}
+                <span style={{ color: C.mid, minWidth: 32, textAlign: "right" }}>{t.count}</span>
+              </span>
             </div>
             <div style={{ height: 8, background: C.panel2, borderRadius: 99, overflow: "hidden" }}>
               <div style={{ width: `${(t.count / max) * 100}%`, height: "100%", background: C.cyan, borderRadius: 99 }} />

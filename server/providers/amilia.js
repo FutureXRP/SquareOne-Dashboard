@@ -105,25 +105,38 @@ amiliaRouter.get(
       .catch((e) => ({ error: e.message }));
     const eList = unwrap(events);
 
-    // Probe candidate endpoints and report which ones answer (status + count),
-    // so we can pin the exact call for member headcounts and facility bookings.
-    const id = mList[0]?.Id ?? mList[0]?.id;
+    // Wide window (30 days back → 90 ahead) to surface a real reservation/event
+    // sample so we can map fields exactly (today is often empty).
+    const wideFrom = isoDay(-30);
+    const wideTo = isoDay(90);
+    const sampleOf = async (path) => {
+      try {
+        const r = await get(path, jwt);
+        const items = r?.Items || (Array.isArray(r) ? r : []);
+        return { path, ok: true, count: items.length, totalCount: r?.Paging?.TotalCount ?? null, itemKeys: keys(items[0]), sample: items[0] ?? null };
+      } catch (e) { return { path, ok: false, error: e.message }; }
+    };
+    const [reservationsWide, eventsWide, locations] = await Promise.all([
+      sampleOf(`/reservations?from=${wideFrom}&to=${wideTo}`),
+      sampleOf(`/events?from=${wideFrom}&to=${wideTo}&showParticipants=true`),
+      sampleOf(`/locations`),
+    ]);
+
+    // Discovery: which other feeds exist (status + count only) for future tabs.
     const probe = async (path) => {
       try {
         const r = await get(path, jwt);
-        return { path, ok: true, isArray: Array.isArray(r), topKeys: keys(r), totalCount: r?.Paging?.TotalCount ?? null, itemsLen: (r?.Items || (Array.isArray(r) ? r : [])).length };
+        return { path, ok: true, totalCount: r?.Paging?.TotalCount ?? null, itemsLen: (r?.Items || (Array.isArray(r) ? r : [])).length, topKeys: keys(r) };
       } catch (e) { return { path, ok: false, error: e.message }; }
     };
     const probes = await Promise.all([
-      ...(id ? [
-        `/memberships/${id}/persons?status=Active`,
-        `/memberships/${id}/persons`,
-        `/memberships/${id}/members`,
-      ] : []),
-      `/members?page=1&perPage=1`,
-      `/reservations?from=${date}&to=${date}`,
-      `/facilities`,
-      `/locations`,
+      `/activities`,
+      `/registrations`,
+      `/accounts?page=1&perPage=1`,
+      `/orders`,
+      `/merchandises`,
+      `/transactions`,
+      `/staff`,
     ].map(probe));
 
     return {
@@ -132,7 +145,8 @@ amiliaRouter.get(
       memberships: { count: mList.length, itemKeys: keys(mList[0]), sample: mList[0] ?? null, paging: memberships?.Paging ?? null, error: memberships?.error },
       membershipPersons: { itemKeys: keys(unwrap(persons)[0]), sample: unwrap(persons)[0] ?? null, paging: persons?.Paging ?? null, error: persons?.error },
       events: { count: eList.length, itemKeys: keys(eList[0]), sample: eList[0] ?? null, paging: events?.Paging ?? null, error: events?.error },
-      probes,
+      reservationsWide, eventsWide, locations,
+      discovery: probes,
     };
   })
 );
@@ -148,10 +162,14 @@ amiliaRouter.get(
 
     const byType = [];
     let total = 0;
+    let projectedRevenue = 0; // sum of membership list price × active members
     for (const m of list) {
       const { count } = await countPersons(m.Id ?? m.id, jwt);
+      const price = Number(m.Price) || 0;
+      const revenue = price * count;
       total += count;
-      byType.push({ type: m.Name ?? m.name ?? `Membership ${m.Id ?? m.id}`, count });
+      projectedRevenue += revenue;
+      byType.push({ type: m.Name ?? m.name ?? `Membership ${m.Id ?? m.id}`, count, price, revenue });
     }
 
     return {
@@ -160,41 +178,56 @@ amiliaRouter.get(
       newThisMonth: 0,          // derive from registrations/date filters when needed
       cancelledThisMonth: 0,
       checkedInNow: 0,          // Amilia has no live check-in count; wire from access control if needed
+      projectedRevenue,         // based on membership list price × active members
       byType,
     };
   })
 );
 
-// Bookings/schedule for a date (defaults to today). Uses the activity events feed.
+// Facility bookings from Amilia's reservations feed (confirmed valid endpoint).
+// Defaults to an upcoming 14-day window since same-day reservations are often 0.
 amiliaRouter.get(
   "/bookings",
   guard("amilia", async (req) => {
     const jwt = await getJwt();
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
-    // from/to as the same day => single-day schedule. showParticipants adds party sizes.
-    const events = await get(
-      `/events?from=${date}&to=${date}&showParticipants=true&showCanceled=false`,
-      jwt
-    );
-    const items = events?.Items || events || [];
-    return items.map((e, i) => {
-      const start = e.Start || e.StartDate || e.start;
-      const end = e.End || e.EndDate || e.end;
+    const from = req.query.from || isoDay(0);
+    const to = req.query.to || isoDay(13);
+    let res = null;
+    try { res = await get(`/reservations?from=${from}&to=${to}`, jwt); } catch { /* fall through to empty */ }
+    const items = res?.Items || (Array.isArray(res) ? res : []) || [];
+
+    const norm = items.map((r, i) => {
+      const start = r.Start || r.StartDate || r.StartDateTime || r.start;
+      const end = r.End || r.EndDate || r.EndDateTime || r.end;
       return {
-        id: e.Id ?? e.id ?? i,
-        room: e.LocationName || e.Location?.Name || e.location || "—",
-        activity: e.Name || e.ActivityName || e.title || "Activity",
+        id: r.Id ?? r.id ?? i,
+        _sort: start ? new Date(start).getTime() : 0,
+        date: fmtDate(start),
         start: fmtTime(start),
         end: fmtTime(end),
-        party: e.Participants?.length ?? e.ParticipantCount ?? 0,
-        status: (e.Status || "confirmed").toString().toLowerCase(),
+        room: r.LocationName || r.Location?.Name || r.ResourceName || r.Resource?.Name || r.FacilityName || "—",
+        activity: r.Name || r.Title || r.ActivityName || r.Description || r.Notes || "Reservation",
+        who: r.ContactName || r.AccountName || r.OwnerName || r.PersonName || r.ClientName || "",
+        party: r.Attendees ?? r.ParticipantCount ?? (Array.isArray(r.Participants) ? r.Participants.length : 0),
+        status: (r.Status || "confirmed").toString().toLowerCase(),
       };
     });
+    norm.sort((a, b) => a._sort - b._sort);
+    norm.forEach((n) => delete n._sort);
+    return norm;
   })
 );
 
+function isoDay(offset) {
+  return new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
+}
 function fmtTime(v) {
   if (!v) return "—";
   const d = new Date(v);
   return isNaN(d) ? String(v) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function fmtDate(v) {
+  if (!v) return "—";
+  const d = new Date(v);
+  return isNaN(d) ? String(v) : d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
 }
