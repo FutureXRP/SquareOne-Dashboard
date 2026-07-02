@@ -547,7 +547,11 @@ function Bookings({ bookings, live }) {
 
 /* ----------------------------- MEMBERS (Amilia) ----------------------------- */
 function Members({ members, live }) {
-  const max = Math.max(1, ...members.byType.map((t) => t.count));
+  // Only plans people are actually on — offered-but-empty plans (e.g. a $1,200
+  // plan with 0 members) are noise here, so they're summarized in the footer.
+  const activePlans = members.byType.filter((t) => t.count > 0);
+  const emptyPlans = members.byType.length - activePlans.length;
+  const max = Math.max(1, ...activePlans.map((t) => t.count));
   const revenue = members.projectedRevenue ?? members.byType.reduce((s, t) => s + (t.revenue || 0), 0);
   const activePct = members.total ? Math.round((members.active / members.total) * 100) : 0;
   return (
@@ -555,17 +559,21 @@ function Members({ members, live }) {
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Total members" value={members.total} icon={Users} color={C.cyan} />
         <Stat label="Active" value={members.active} sub={`${activePct}% of total`} icon={UserCheck} color={C.go} />
-        <Stat label="Projected revenue" value={fmtMoney(revenue)} sub="list price × active" icon={DollarSign} color={C.go} />
-        <Stat label="Membership plans" value={members.byType.length} icon={Building2} color={C.cyan} />
+        <Stat label="Projected revenue" value={fmtMoney(revenue)} sub="list price × fees billed" icon={DollarSign} color={C.go} />
+        <Stat label="Live plans" value={activePlans.length} sub={emptyPlans ? `of ${members.byType.length} offered` : undefined} icon={Building2} color={C.cyan} />
       </div>
       <Panel title="Membership by Type" accent={C.cyan}
         right={<SourceTag live={live} name="Amilia" />}>
-        {members.byType.map((t) => (
+        {activePlans.map((t) => (
           <div key={t.type} style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
             <div className="flex items-center justify-between gap-3" style={{ fontSize: 13.5, marginBottom: 6 }}>
               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.type}</span>
               <span className="flex items-center gap-3" style={{ fontFamily: mono, flexShrink: 0 }}>
                 {t.price != null && <span style={{ color: C.dim, fontSize: 12 }}>{fmtMoney(t.price)} ea</span>}
+                {/* When a plan bills once per family, show fees × people so the math is clear. */}
+                {t.fees != null && t.fees !== t.count && (
+                  <span style={{ color: C.amber, fontSize: 12 }}>{t.fees} {t.fees === 1 ? "fee" : "fees"}</span>
+                )}
                 {t.revenue != null && <span style={{ color: C.go }}>{fmtMoney(t.revenue)}</span>}
                 <span style={{ color: C.mid, minWidth: 32, textAlign: "right" }}>{t.count}</span>
               </span>
@@ -575,6 +583,12 @@ function Members({ members, live }) {
             </div>
           </div>
         ))}
+        {emptyPlans > 0 && (
+          <div style={{ paddingTop: 10, fontSize: 11.5, color: C.dim, fontFamily: mono }}>
+            + {emptyPlans} offered {emptyPlans === 1 ? "plan" : "plans"} with no members yet
+            {" — "}{members.byType.filter((t) => t.count === 0).map((t) => t.type).join(", ")}
+          </div>
+        )}
       </Panel>
     </div>
   );
