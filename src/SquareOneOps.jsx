@@ -529,7 +529,7 @@ function Bookings({ bookings, live }) {
           </div>
         ))}
       </Panel>
-      <DoorSchedule />
+      <BookingAutomation />
       {facilities.length > 0 && (
         <Panel title={`Facilities · ${facilities.length}`} accent={C.dim} right={<SourceTag live={live} name="Amilia" />}>
           <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
@@ -546,9 +546,10 @@ function Bookings({ bookings, live }) {
   );
 }
 
-// Booking-driven door windows: each reservation unlocks its room's door ahead
-// of start and relocks it after end (server/providers/doorSchedule.js).
-function DoorSchedule() {
+// Booking-driven automation: each reservation unlocks its room's door ahead of
+// start / relocks after end, and pre-conditions the room's HVAC to the event
+// setpoint / sets back after (server/providers/doorSchedule.js).
+function BookingAutomation() {
   const [sched, setSched] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -558,43 +559,65 @@ function DoorSchedule() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
-  if (!sched || !sched.windows?.length) return null;
+  if (!sched) return null;
   const t = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const day = (ms) => new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-  const chip = (w) =>
+  const liveTag = (
+    <span style={{ fontSize: 11, fontFamily: mono, color: sched.hubLive ? C.go : C.amber }}>
+      {sched.hubLive ? "AUTO · Home Assistant" : "PLANNED · goes live with Home Assistant"}
+    </span>
+  );
+  const Row = ({ from, to, room, sub, activity, chip: c, k }) => (
+    <div key={k} className="flex items-center gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
+      <span style={{ fontFamily: mono, color: C.mid, fontSize: 12.5, minWidth: 92 }}>{day(from)}</span>
+      <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 118 }}>{t(from)} → {t(to)}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {room}{sub ? <span style={{ color: C.mid, fontWeight: 400 }}> · {sub}</span> : ""}
+        </div>
+        <div style={{ fontSize: 12.5, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{activity}</div>
+      </div>
+      <span style={{ fontSize: 11, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, color: c.color, flexShrink: 0 }}>
+        {c.text}
+      </span>
+    </div>
+  );
+  const doorChip = (w) =>
     !w.doorId ? { text: "no door mapped", color: C.amber } :
     w.status === "open" ? { text: "OPEN NOW", color: C.go } :
     w.status === "done" ? { text: "done", color: C.dim } :
     { text: "scheduled", color: C.cyan };
+  const climChip = (w) =>
+    !w.zoneId ? { text: "no zone mapped", color: C.amber } :
+    w.status === "conditioning" ? { text: "CONDITIONING", color: C.go } :
+    w.status === "done" ? { text: "done", color: C.dim } :
+    { text: "scheduled", color: C.cyan };
   return (
-    <Panel title="Door Schedule" accent={C.go}
-      right={<span style={{ fontSize: 11, fontFamily: mono, color: sched.hubLive ? C.go : C.amber }}>
-        {sched.hubLive ? "AUTO · Home Assistant" : "PLANNED · goes live with Home Assistant"}
-      </span>}>
-      <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, paddingBottom: 8 }}>
-        unlock {sched.leadMin} min before · relock {sched.lagMin} min after each booking
-      </div>
-      {sched.windows.map((w) => {
-        const c = chip(w);
-        return (
-          <div key={w.id} className="flex items-center gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
-            <span style={{ fontFamily: mono, color: C.mid, fontSize: 12.5, minWidth: 92 }}>{day(w.unlockAt)}</span>
-            <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 118 }}>
-              {t(w.unlockAt)} → {t(w.relockAt)}
-            </span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {w.room}{w.doorName ? <span style={{ color: C.mid, fontWeight: 400 }}> · {w.doorName} door</span> : ""}
-              </div>
-              <div style={{ fontSize: 12.5, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.activity}</div>
-            </div>
-            <span style={{ fontSize: 11, fontFamily: mono, textTransform: "uppercase", letterSpacing: 1, color: c.color, flexShrink: 0 }}>
-              {c.text}
-            </span>
+    <>
+      {sched.windows?.length > 0 && (
+        <Panel title="Door Schedule" accent={C.go} right={liveTag}>
+          <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, paddingBottom: 8 }}>
+            unlock {sched.leadMin} min before · relock {sched.lagMin} min after each booking
           </div>
-        );
-      })}
-    </Panel>
+          {sched.windows.map((w) => (
+            <Row key={w.id} k={w.id} from={w.unlockAt} to={w.relockAt} room={w.room}
+              sub={w.doorName ? `${w.doorName} door` : ""} activity={w.activity} chip={doorChip(w)} />
+          ))}
+        </Panel>
+      )}
+      {sched.climate?.windows?.length > 0 && (
+        <Panel title="Climate Schedule" accent={C.amber} right={liveTag}>
+          <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, paddingBottom: 8 }}>
+            {sched.climate.eventTemp}° from {sched.climate.preMin} min before · back to {sched.climate.idleTemp}° {sched.climate.postMin} min after
+            {" · overlapping events hold the event setpoint"}
+          </div>
+          {sched.climate.windows.map((w) => (
+            <Row key={`c-${w.id}`} k={`c-${w.id}`} from={w.preAt} to={w.postAt} room={w.room}
+              sub={w.zoneName ? `${w.zoneName} zone · ${w.eventTemp}°→${w.idleTemp}°` : ""} activity={w.activity} chip={climChip(w)} />
+          ))}
+        </Panel>
+      )}
+    </>
   );
 }
 

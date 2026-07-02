@@ -28,53 +28,82 @@ export const doorsRouter = Router();
 
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-// Which dashboard door controls a booked room? Explicit DOOR_BOOKING_MAP wins;
-// otherwise fuzzy-match the room name against the configured door names.
-function doorForRoom(room) {
-  const doors = config.homeassistant.entities.doors || {};
+// Which dashboard door/zone serves a booked room? The explicit env map wins;
+// otherwise fuzzy-match the room name against the configured entity names.
+function targetForRoom(room, map, entities) {
   const r = norm(room);
   if (!r) return null;
-  for (const [loc, doorId] of Object.entries(config.doors.map)) {
+  for (const [loc, id] of Object.entries(map)) {
     const l = norm(loc);
-    if ((r.includes(l) || l.includes(r)) && doors[doorId]) return doorId;
+    if ((r.includes(l) || l.includes(r)) && entities[id]) return id;
   }
-  for (const [id, def] of Object.entries(doors)) {
+  for (const [id, def] of Object.entries(entities)) {
     const d = norm(def.name);
     if (d && (r.includes(d) || d.includes(r))) return id;
   }
   return null;
 }
+const doorForRoom = (room) => targetForRoom(room, config.doors.map, config.homeassistant.entities.doors || {});
+const zoneForRoom = (room) => targetForRoom(room, config.climate.map, config.homeassistant.entities.zones || {});
 
 const isoDay = (offset) => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 
 // Reservations (yesterday..tomorrow, so windows spanning midnight are covered)
-// -> unlock/relock windows. Cancelled and all-day entries produce no window.
-async function computeWindows() {
+// as plain spans. Cancelled and all-day entries produce nothing.
+async function fetchSpans() {
   const items = await fetchReservations(isoDay(-1), isoDay(1));
+  return items
+    .filter((r) => !r.IsCancelled && !r.AllDay && (r.Start || r.StartDate) && (r.End || r.EndDate))
+    .map((r) => ({
+      id: r.ReservationId ?? r.Id,
+      start: new Date(r.Start || r.StartDate).getTime(),
+      end: new Date(r.End || r.EndDate).getTime(),
+      room: r.Location?.Name || r.LocationName || "",
+      activity: r.Title || r.AdminBooking?.Name || "Reservation",
+    }));
+}
+
+// Door windows: unlock before start, relock after end.
+function doorWindows(spans) {
   const lead = config.doors.leadMin * 60000;
   const lag = config.doors.lagMin * 60000;
   const now = Date.now();
-  return items
-    .filter((r) => !r.IsCancelled && !r.AllDay && (r.Start || r.StartDate) && (r.End || r.EndDate))
-    .map((r) => {
-      const start = new Date(r.Start || r.StartDate).getTime();
-      const end = new Date(r.End || r.EndDate).getTime();
-      const room = r.Location?.Name || r.LocationName || "";
-      const doorId = doorForRoom(room);
-      const unlockAt = start - lead;
-      const relockAt = end + lag;
+  return spans
+    .map((s) => {
+      const doorId = doorForRoom(s.room);
+      const unlockAt = s.start - lead;
+      const relockAt = s.end + lag;
       return {
-        id: r.ReservationId ?? r.Id,
-        room,
-        activity: r.Title || r.AdminBooking?.Name || "Reservation",
-        doorId,
-        doorName: doorId ? config.homeassistant.entities.doors[doorId].name : null,
-        unlockAt,
-        relockAt,
+        id: s.id, room: s.room, activity: s.activity,
+        doorId, doorName: doorId ? config.homeassistant.entities.doors[doorId].name : null,
+        unlockAt, relockAt,
         status: now < unlockAt ? "scheduled" : now < relockAt ? "open" : "done",
       };
     })
     .sort((a, b) => a.unlockAt - b.unlockAt);
+}
+
+// Climate windows: event setpoint before start, idle setpoint after end.
+function climateWindows(spans) {
+  const pre = config.climate.preMin * 60000;
+  const post = config.climate.postMin * 60000;
+  const now = Date.now();
+  return spans
+    .map((s) => {
+      const zoneId = zoneForRoom(s.room);
+      const sp = (zoneId && config.climate.setpoints[zoneId]) || {};
+      const preAt = s.start - pre;
+      const postAt = s.end + post;
+      return {
+        id: s.id, room: s.room, activity: s.activity,
+        zoneId, zoneName: zoneId ? config.homeassistant.entities.zones[zoneId].name : null,
+        eventTemp: Number(sp.event) || config.climate.eventTemp,
+        idleTemp: Number(sp.idle) || config.climate.idleTemp,
+        preAt, postAt,
+        status: now < preAt ? "scheduled" : now < postAt ? "conditioning" : "done",
+      };
+    })
+    .sort((a, b) => a.preAt - b.preAt);
 }
 
 // Today's windows for the Bookings tab.
@@ -82,12 +111,19 @@ doorsRouter.get(
   "/schedule",
   requireAuth,
   guard("amilia", async () => {
-    const windows = await computeWindows();
+    const spans = await fetchSpans();
     return {
       leadMin: config.doors.leadMin,
       lagMin: config.doors.lagMin,
       hubLive: haConfigured(),
-      windows,
+      windows: doorWindows(spans),
+      climate: {
+        preMin: config.climate.preMin,
+        postMin: config.climate.postMin,
+        eventTemp: config.climate.eventTemp,
+        idleTemp: config.climate.idleTemp,
+        windows: climateWindows(spans),
+      },
     };
   })
 );
@@ -103,42 +139,57 @@ function cronAuth(req, res, next) {
   next();
 }
 
-// The reconciler tick. Acts only on unlock/relock edges that passed within the
+// The reconciler tick. Acts only on window edges that passed within the
 // lookback period, so a delayed cron still catches them and manual overrides
-// outside the edges are left alone.
+// outside the edges are left alone. Handles both doors and climate.
 doorsRouter.all(
   "/run",
   cronAuth,
   guard("amilia", async (req) => {
-    const windows = (await computeWindows()).filter((w) => w.doorId);
+    const spans = await fetchSpans();
     const now = Date.now();
     const lookback = config.doors.lookbackMin * 60000;
     const live = haConfigured();
-
-    // A door should be open if ANY of its windows covers "now" — back-to-back
-    // bookings must not relock the door between them.
-    const openNow = (doorId) => windows.some((w) => w.doorId === doorId && w.unlockAt <= now && now < w.relockAt);
-
     const actions = [];
-    const acted = new Set(); // one action per door per tick
-    for (const w of windows) {
-      if (acted.has(w.doorId)) continue;
-      const unlockEdge = now - lookback < w.unlockAt && w.unlockAt <= now && now < w.relockAt;
-      const relockEdge = now - lookback < w.relockAt && w.relockAt <= now && !openNow(w.doorId);
-      if (!unlockEdge && !relockEdge) continue;
-      const action = unlockEdge ? "unlock" : "lock";
-      let executed = false, error = null;
-      if (live) {
-        try {
-          await (action === "unlock" ? haOps.unlockDoor(w.doorId) : haOps.lockDoor(w.doorId));
-          executed = true;
-        } catch (e) { error = e.message; }
-      }
-      logAudit(req, `doors.auto-${action}`, w.doorId, { room: w.room, activity: w.activity, executed });
-      acted.add(w.doorId);
-      actions.push({ door: w.doorId, doorName: w.doorName, action, room: w.room, activity: w.activity, executed, error });
-    }
 
-    return { at: new Date(now).toISOString(), hubLive: live, windowCount: windows.length, actions };
+    // Generic edge reconciler: onAt..offAt windows per target, with overlap
+    // coverage — back-to-back/overlapping bookings keep the "on" state until
+    // the LAST window clears.
+    const reconcile = async (windows, key, onAt, offAt, applyOn, applyOff, label) => {
+      const covered = (id) => windows.some((w) => w[key] === id && w[onAt] <= now && now < w[offAt]);
+      const acted = new Set(); // one action per target per tick
+      for (const w of windows) {
+        const id = w[key];
+        if (!id || acted.has(id)) continue;
+        const onEdge = now - lookback < w[onAt] && w[onAt] <= now && now < w[offAt];
+        const offEdge = now - lookback < w[offAt] && w[offAt] <= now && !covered(id);
+        if (!onEdge && !offEdge) continue;
+        let executed = false, error = null;
+        if (live) {
+          try { await (onEdge ? applyOn(w) : applyOff(w)); executed = true; }
+          catch (e) { error = e.message; }
+        }
+        const action = onEdge ? label.on : label.off;
+        logAudit(req, action.audit, id, { room: w.room, activity: w.activity, executed, ...(action.detail?.(w) || {}) });
+        acted.add(id);
+        actions.push({ target: id, name: w.doorName || w.zoneName, action: action.name, room: w.room, activity: w.activity, executed, error, ...(action.detail?.(w) || {}) });
+      }
+    };
+
+    await reconcile(
+      doorWindows(spans), "doorId", "unlockAt", "relockAt",
+      (w) => haOps.unlockDoor(w.doorId), (w) => haOps.lockDoor(w.doorId),
+      { on: { name: "unlock", audit: "doors.auto-unlock" }, off: { name: "lock", audit: "doors.auto-lock" } }
+    );
+    await reconcile(
+      climateWindows(spans), "zoneId", "preAt", "postAt",
+      (w) => haOps.setTemp(w.zoneId, w.eventTemp), (w) => haOps.setTemp(w.zoneId, w.idleTemp),
+      {
+        on: { name: "set-event-temp", audit: "climate.auto-event", detail: (w) => ({ temp: w.eventTemp }) },
+        off: { name: "set-idle-temp", audit: "climate.auto-idle", detail: (w) => ({ temp: w.idleTemp }) },
+      }
+    );
+
+    return { at: new Date(now).toISOString(), hubLive: live, spanCount: spans.length, actions };
   })
 );
