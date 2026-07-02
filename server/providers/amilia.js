@@ -224,6 +224,19 @@ amiliaRouter.get(
   })
 );
 
+// Every person on every membership, flat — shared with the new-member alert
+// check (server/providers/memberAlerts.js).
+export async function allMembershipPersons() {
+  const jwt = await getJwt();
+  const list = await listMemberships(jwt);
+  const out = [];
+  for (const m of list) {
+    const { items } = await fetchPersons(m.Id ?? m.id, jwt);
+    for (const p of items) out.push({ membershipId: m.Id ?? m.id, membership: m.Name ?? m.name ?? "", person: p });
+  }
+  return out;
+}
+
 // The default /memberships list excludes archived (discontinued) plans, but a
 // discontinued plan can still have grandfathered members paying its fee. Try the
 // archived-list variants and merge any extra plans found (dedup by Id).

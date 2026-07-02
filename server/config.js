@@ -86,6 +86,21 @@ export const config = {
     },
   },
 
+  // SMS alerts (via Twilio) — e.g. "text this number when a new member joins".
+  // ALERT_PHONE is the destination in E.164 form (+19185551234); TWILIO_FROM is
+  // your Twilio number. The new-member check runs on the /api/doors/run cron.
+  alerts: {
+    phone: process.env.ALERT_PHONE || "",
+    twilio: {
+      sid: process.env.TWILIO_ACCOUNT_SID || "",
+      token: process.env.TWILIO_AUTH_TOKEN || "",
+      from: process.env.TWILIO_FROM || "",
+    },
+    get configured() {
+      return Boolean(this.phone && this.twilio.sid && this.twilio.token && this.twilio.from);
+    },
+  },
+
   // The built-in assistant agent (Claude). Needs an Anthropic API key.
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY || "",

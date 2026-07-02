@@ -8,6 +8,7 @@ import { procareRouter } from "./providers/procare.js";
 import { hubRouter } from "./providers/homeassistant.js";
 import { assistantRouter } from "./providers/assistant.js";
 import { doorsRouter } from "./providers/doorSchedule.js";
+import { alertsRouter } from "./providers/memberAlerts.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -28,6 +29,7 @@ app.get("/api/health", (_req, res) => {
       hik: config.hik.configured,
       procare: config.procare.configured,
       assistant: config.anthropic.configured,
+      alerts: config.alerts.configured,
     },
   });
 });
@@ -41,5 +43,6 @@ app.use("/api/assistant", requireAuth, assistantRouter);
 // Door schedule handles its own auth per-route: /schedule wants a signed-in
 // user, /run wants the cron secret (a scheduler can't sign in).
 app.use("/api/doors", doorsRouter);
+app.use("/api/alerts", alertsRouter);
 
 export default app;
