@@ -51,28 +51,68 @@ async function get(path, jwt) {
   });
 }
 
-// Count the people in a membership. Amilia rejected the plain paginated call with
-// a 400, so try the documented variants in order and use the first that answers.
-// Returns { count, via } (via = the path that worked, or null).
-const PERSON_COUNT_PATHS = (id) => [
+// Fetch the people in a membership. Amilia rejected the plain paginated call with
+// a 400, so try the documented variants (that return the full list) in order and
+// use the first that answers. Returns { items, total, via }.
+const PERSON_PATHS = (id) => [
   `/memberships/${id}/persons?status=Active`,
   `/memberships/${id}/persons`,
-  `/memberships/${id}/persons?status=Active&page=1&perPage=1`,
   `/memberships/${id}/members`,
-  `/memberships/${id}/persons?page=1&perPage=1`,
 ];
 
-async function countPersons(id, jwt) {
-  for (const path of PERSON_COUNT_PATHS(id)) {
+async function fetchPersons(id, jwt) {
+  for (const path of PERSON_PATHS(id)) {
+    try {
+      const r = await get(path, jwt);
+      const items = r?.Items || (Array.isArray(r) ? r : []);
+      const total = typeof r?.Paging?.TotalCount === "number" ? r.Paging.TotalCount : items.length;
+      if (items.length || total) return { items, total, via: path };
+    } catch { /* try the next variant */ }
+  }
+  return { items: [], total: 0, via: null };
+}
+
+// How many FEES a membership generates. A family plan is one fee covering several
+// people, so headcount overstates revenue. Prefer, in order of reliability:
+//   1. subscriptions/purchases sold (each = one fee),
+//   2. persons flagged as the primary/account owner (one per family),
+//   3. distinct billing accounts among the persons (one per family),
+//   4. headcount (only when nothing better is available — matches old behavior).
+// Returns { fees, basis }.
+const SUBSCRIPTION_PATHS = (id) => [`/memberships/${id}/subscriptions`, `/memberships/${id}/purchases`];
+const OWNER_FLAGS = ["IsPrimary", "IsOwner", "IsPrincipal", "IsAccountOwner", "IsMainMember", "IsHeadOfFamily"];
+const ACCOUNT_KEYS = ["AccountId", "OwnerId", "OwnerAccountId", "BillingAccountId", "FamilyId", "MainAccountId", "HouseholdId"];
+
+async function countSubscriptions(id, jwt) {
+  for (const path of SUBSCRIPTION_PATHS(id)) {
     try {
       const r = await get(path, jwt);
       const tc = r?.Paging?.TotalCount;
       if (typeof tc === "number") return { count: tc, via: path };
-      if (Array.isArray(r?.Items)) return { count: r.Items.length, via: path };
-      if (Array.isArray(r)) return { count: r.length, via: path };
-    } catch { /* try the next variant */ }
+      const items = r?.Items || (Array.isArray(r) ? r : []);
+      if (items.length) return { count: items.length, via: path };
+    } catch { /* endpoint may not exist for this org */ }
   }
-  return { count: 0, via: null };
+  return null;
+}
+
+function feesFromPersons(items) {
+  if (!items.length) return null;
+  // A person flagged as the primary/owner represents one billed family unit.
+  for (const f of OWNER_FLAGS) {
+    if (f in items[0]) {
+      const n = items.filter((p) => p[f] === true).length;
+      if (n > 0) return { fees: n, basis: `primary:${f}` };
+    }
+  }
+  // Otherwise collapse people to distinct billing accounts (one fee per family).
+  for (const k of ACCOUNT_KEYS) {
+    if (items[0][k] != null) {
+      const ids = new Set(items.map((p) => p[k]).filter((v) => v != null));
+      if (ids.size) return { fees: ids.size, basis: `accounts:${k}` };
+    }
+  }
+  return null;
 }
 
 /*
@@ -96,9 +136,14 @@ amiliaRouter.get(
     const mList = unwrap(memberships);
 
     let persons = null;
+    let subscriptions = null;
     if (mList[0]) {
       const id = mList[0].Id ?? mList[0].id;
-      persons = await get(`/memberships/${id}/persons?page=1&perPage=1`, jwt).catch((e) => ({ error: e.message }));
+      // Full person list (not perPage=1) so we can see whether records carry an
+      // owner/primary flag or a billing-account id to collapse family plans on.
+      persons = await get(`/memberships/${id}/persons?status=Active`, jwt).catch((e) => ({ error: e.message }));
+      // Does this org expose subscriptions/purchases sold? That's the ideal fee count.
+      subscriptions = await get(`/memberships/${id}/subscriptions`, jwt).catch((e) => ({ error: e.message }));
     }
 
     const events = await get(`/events?from=${date}&to=${date}&showParticipants=true&showCanceled=false`, jwt)
@@ -144,6 +189,7 @@ amiliaRouter.get(
       orgBase: orgBase(),
       memberships: { count: mList.length, itemKeys: keys(mList[0]), sample: mList[0] ?? null, paging: memberships?.Paging ?? null, error: memberships?.error },
       membershipPersons: { itemKeys: keys(unwrap(persons)[0]), sample: unwrap(persons)[0] ?? null, paging: persons?.Paging ?? null, error: persons?.error },
+      membershipSubscriptions: { itemKeys: keys(unwrap(subscriptions)[0]), sample: unwrap(subscriptions)[0] ?? null, paging: subscriptions?.Paging ?? null, error: subscriptions?.error },
       events: { count: eList.length, itemKeys: keys(eList[0]), sample: eList[0] ?? null, paging: events?.Paging ?? null, error: events?.error },
       reservationsWide, eventsWide, locations,
       discovery: probes,
@@ -162,14 +208,32 @@ amiliaRouter.get(
 
     const byType = [];
     let total = 0;
-    let projectedRevenue = 0; // sum of membership list price × active members
+    let projectedRevenue = 0; // sum of membership list price × number of FEES (not headcount)
     for (const m of list) {
-      const { count } = await countPersons(m.Id ?? m.id, jwt);
+      const id = m.Id ?? m.id;
       const price = Number(m.Price) || 0;
-      const revenue = price * count;
+
+      // Headcount (people covered) — shown in the UI.
+      const { items, total: count } = await fetchPersons(id, jwt);
+
+      // Number of fees this membership generates. A family plan bills once per
+      // family, so we must not multiply price by headcount. Prefer subscriptions
+      // sold, then primary-member/distinct-account counts, then fall back to
+      // headcount only when Amilia gives us nothing to collapse on.
+      const subs = await countSubscriptions(id, jwt);
+      let fees, basis;
+      if (subs) {
+        ({ count: fees } = subs); basis = `subscriptions (${subs.via.split("/").pop()})`;
+      } else {
+        const fp = feesFromPersons(items);
+        if (fp) ({ fees, basis } = fp);
+        else { fees = count; basis = "headcount"; }
+      }
+
+      const revenue = price * fees;
       total += count;
       projectedRevenue += revenue;
-      byType.push({ type: m.Name ?? m.name ?? `Membership ${m.Id ?? m.id}`, count, price, revenue });
+      byType.push({ type: m.Name ?? m.name ?? `Membership ${id}`, count, fees, price, revenue, basis });
     }
 
     return {
@@ -178,8 +242,8 @@ amiliaRouter.get(
       newThisMonth: 0,          // derive from registrations/date filters when needed
       cancelledThisMonth: 0,
       checkedInNow: 0,          // Amilia has no live check-in count; wire from access control if needed
-      projectedRevenue,         // based on membership list price × active members
-      byType,
+      projectedRevenue,         // membership list price × number of fees (family plans billed once)
+      byType,                   // each: { type, count (people), fees (billed units), price, revenue, basis }
     };
   })
 );

@@ -555,7 +555,7 @@ function Members({ members, live }) {
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Total members" value={members.total} icon={Users} color={C.cyan} />
         <Stat label="Active" value={members.active} sub={`${activePct}% of total`} icon={UserCheck} color={C.go} />
-        <Stat label="Projected revenue" value={fmtMoney(revenue)} sub="list price × active" icon={DollarSign} color={C.go} />
+        <Stat label="Projected revenue" value={fmtMoney(revenue)} sub="list price × fees billed" icon={DollarSign} color={C.go} />
         <Stat label="Membership plans" value={members.byType.length} icon={Building2} color={C.cyan} />
       </div>
       <Panel title="Membership by Type" accent={C.cyan}
@@ -566,6 +566,10 @@ function Members({ members, live }) {
               <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.type}</span>
               <span className="flex items-center gap-3" style={{ fontFamily: mono, flexShrink: 0 }}>
                 {t.price != null && <span style={{ color: C.dim, fontSize: 12 }}>{fmtMoney(t.price)} ea</span>}
+                {/* When a plan bills once per family, show fees × people so the math is clear. */}
+                {t.fees != null && t.fees !== t.count && (
+                  <span style={{ color: C.amber, fontSize: 12 }}>{t.fees} {t.fees === 1 ? "fee" : "fees"}</span>
+                )}
                 {t.revenue != null && <span style={{ color: C.go }}>{fmtMoney(t.revenue)}</span>}
                 <span style={{ color: C.mid, minWidth: 32, textAlign: "right" }}>{t.count}</span>
               </span>
