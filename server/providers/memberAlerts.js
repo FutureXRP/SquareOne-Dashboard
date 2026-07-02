@@ -7,16 +7,17 @@ import { allMembershipPersons } from "./amilia.js";
 export const alertsRouter = Router();
 
 /*
-  New-member SMS alerts.
+  New-member alerts.
 
-  Every /api/doors/run cron tick also diffs the current membership roster
-  against the last-seen roster (persisted in the token_cache kv). Anyone new
-  triggers one SMS to ALERT_PHONE via Twilio — batched, so five sign-ups in one
-  tick is one text, and capped so a burst can't run up the bill.
+  Every /api/doors/run cron tick diffs the current membership roster against
+  the last-seen roster (persisted in the token_cache kv). Anyone new triggers
+  ONE batched alert on every configured channel:
+    - Email via Resend (RESEND_API_KEY + ALERT_EMAIL) — easiest to set up.
+    - SMS via Twilio (TWILIO_* + ALERT_PHONE) — when texts are wanted.
 
-  First run seeds the roster silently (no blast of texts for existing members).
+  First run seeds the roster silently (no blast for existing members).
 
-  GET /api/alerts/test (admin) — sends a test SMS to verify the Twilio wiring.
+  GET /api/alerts/test (admin) — sends a test alert on all configured channels.
 */
 
 const KV_PROVIDER = "member-alerts";
@@ -32,6 +33,31 @@ export async function sendSms(body) {
     headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" },
     body: params.toString(),
   });
+}
+
+export async function sendEmail(subject, text) {
+  const { email, resendKey, emailFrom } = config.alerts;
+  return http("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${resendKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: emailFrom, to: [email], subject, text }),
+  });
+}
+
+// Send on every configured channel; returns { sent, errors } — sent is true if
+// at least one channel delivered.
+export async function sendAlert(subject, message) {
+  const errors = [];
+  let sent = false;
+  if (config.alerts.emailConfigured) {
+    try { await sendEmail(subject, message); sent = true; }
+    catch (e) { errors.push(`email: ${e.message}`); }
+  }
+  if (config.alerts.smsConfigured) {
+    try { await sendSms(`${subject} — ${message}`); sent = true; }
+    catch (e) { errors.push(`sms: ${e.message}`); }
+  }
+  return { sent, errors };
 }
 
 // "Alta Birdshead" + "Family Fitness Membership" -> "Alta B. (Family Fitness)"
@@ -63,33 +89,37 @@ export async function checkNewMembers(req) {
     const fresh = [...current.entries()].filter(([k]) => !known.has(k)).map(([, e]) => e);
     if (!fresh.length) return { alerted: 0 };
 
-    let sent = false, error = null;
+    let sent = false, errors = [];
     if (config.alerts.configured) {
       const names = fresh.slice(0, 8).map(label).join(", ");
       const more = fresh.length > 8 ? ` +${fresh.length - 8} more` : "";
       const plural = fresh.length === 1 ? "New member" : `${fresh.length} new members`;
-      try {
-        await sendSms(`SquareOne: ${plural} — ${names}${more}`);
-        sent = true;
-      } catch (e) { error = e.message; }
+      ({ sent, errors } = await sendAlert(`SquareOne: ${plural}`, `${names}${more}`));
     }
-    // Mark them seen when the text went out (or SMS isn't set up at all). On a
-    // send failure, leave them unseen so the next tick retries the alert.
+    // Mark them seen when an alert went out (or no channel is set up at all).
+    // On a total send failure, leave them unseen so the next tick retries.
     if (sent || !config.alerts.configured) await save();
     logAudit(req, "alerts.new-members", null, { count: fresh.length, sent });
-    return { alerted: fresh.length, sent, smsConfigured: config.alerts.configured, error };
+    return { alerted: fresh.length, sent, alertsConfigured: config.alerts.configured, errors };
   } catch (e) {
     return { error: e.message };
   }
 }
 
-// Admin: verify the Twilio wiring end-to-end.
+// Admin: verify the alert wiring end-to-end on every configured channel.
 alertsRouter.get(
   "/test",
   requireAdmin,
   guard("alerts", async (req) => {
-    await sendSms("SquareOne dashboard: test alert — SMS wiring works.");
-    logAudit(req, "alerts.test", null, {});
-    return { sent: true, to: config.alerts.phone };
+    const { sent, errors } = await sendAlert("SquareOne dashboard: test alert", "Alert wiring works.");
+    logAudit(req, "alerts.test", null, { sent });
+    return {
+      sent,
+      errors,
+      channels: {
+        email: config.alerts.emailConfigured ? config.alerts.email : null,
+        sms: config.alerts.smsConfigured ? config.alerts.phone : null,
+      },
+    };
   })
 );
