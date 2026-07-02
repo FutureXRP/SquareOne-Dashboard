@@ -243,26 +243,26 @@ amiliaRouter.get(
       // Headcount (people covered) — shown in the UI.
       const { items, total: count } = await fetchPersons(id, jwt);
 
-      // Number of fees this membership generates. A family plan bills once per
-      // family, so we must not multiply price by headcount. Priority:
-      //   AMILIA_FEE_OVERRIDES env var (owner-verified truth) > subscriptions
-      //   sold > primary-member/distinct-account counts > headcount fallback.
-      // Empty plans (offered but nobody on them) bill nothing — skip the probing.
+      // Number of fees this membership generates. Verified against this org's
+      // live data (2026-07): person records carry AccountId, and for the
+      // MultiPerson "Family Fitness" plan the 21 people collapse to exactly the
+      // 4 real memberships. Individual plans bill per PERSON (two spouses can
+      // share an account but each pays), so only MultiPerson plans group by
+      // account. AMILIA_FEE_OVERRIDES still wins if ever set.
       const name = m.Name ?? m.name ?? `Membership ${id}`;
       const override = config.amilia.feeOverrides.find((o) => name.toLowerCase().startsWith(o.prefix));
+      const isMultiPerson = m.MembershipType === "MultiPerson" || m.MultiPersonMembership != null;
       let fees, basis;
       if (count === 0) {
         fees = 0; basis = "empty";
       } else if (override) {
         fees = override.count; basis = "override (AMILIA_FEE_OVERRIDES)";
+      } else if (isMultiPerson) {
+        const accounts = new Set(items.map((p) => p.AccountId).filter((v) => v != null));
+        fees = accounts.size || count;
+        basis = accounts.size ? "families (distinct accounts)" : "headcount";
       } else {
-        const subs = await countSubscriptions(id, jwt);
-        if (subs) { ({ count: fees } = subs); basis = `subscriptions (${subs.via.split("/").pop()})`; }
-        else {
-          const fp = feesFromPersons(items);
-          if (fp) ({ fees, basis } = fp);
-          else { fees = count; basis = "headcount"; }
-        }
+        fees = count; basis = "per-person";
       }
 
       const revenue = price * fees;
