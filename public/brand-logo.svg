@@ -1,0 +1,8 @@
+<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SquareOne Compassion">
+  <!-- Offset overlapping-square mark, echoing the SquareOne Compassion brand mark.
+       Placeholder built from brand colors — replace with the official logo file
+       at public/brand-logo.svg when available. The wordmark sits beside it in the UI. -->
+  <rect x="4" y="16" width="24" height="24" rx="4" fill="#16345F"/>
+  <rect x="20" y="4" width="24" height="24" rx="4" fill="#3B9BE8"/>
+  <rect x="20" y="16" width="8" height="12" fill="#2A5C93"/>
+</svg>

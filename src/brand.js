@@ -8,5 +8,7 @@ export const brand = {
   subtitle: "Operations Center",
   logoSrc: "/brand-logo.svg",
   logoFallbackSrc: "/brand-logo.png",
-  accent: "#52BECF", // placeholder — replace with SquareOne Compassion brand color
+  accent: "#3B9BE8",   // SquareOne brand blue (squareonecompassion.com)
+  navy: "#16345F",     // deep brand navy
+  orange: "#E8833A",   // brand orange accent stripe
 };
