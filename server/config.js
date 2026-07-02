@@ -86,18 +86,32 @@ export const config = {
     },
   },
 
-  // SMS alerts (via Twilio) — e.g. "text this number when a new member joins".
-  // ALERT_PHONE is the destination in E.164 form (+19185551234); TWILIO_FROM is
-  // your Twilio number. The new-member check runs on the /api/doors/run cron.
+  // Owner alerts — e.g. "tell me when a new member joins". Two channels; each
+  // is used when its vars are set (email via Resend is the easiest to set up,
+  // SMS via Twilio when you want texts). The check runs on the /api/doors/run cron.
   alerts: {
+    // Email (Resend — free tier): set RESEND_API_KEY + ALERT_EMAIL.
+    email: process.env.ALERT_EMAIL || "",
+    resendKey: process.env.RESEND_API_KEY || "",
+    // Without a verified domain, Resend only delivers from onboarding@resend.dev
+    // to the address you signed up with — sign up with the ALERT_EMAIL address.
+    emailFrom: process.env.ALERT_EMAIL_FROM || "SquareOne Dashboard <onboarding@resend.dev>",
+    // SMS (Twilio): destination in E.164 form (+19185551234); TWILIO_FROM is
+    // your Twilio number.
     phone: process.env.ALERT_PHONE || "",
     twilio: {
       sid: process.env.TWILIO_ACCOUNT_SID || "",
       token: process.env.TWILIO_AUTH_TOKEN || "",
       from: process.env.TWILIO_FROM || "",
     },
-    get configured() {
+    get emailConfigured() {
+      return Boolean(this.email && this.resendKey);
+    },
+    get smsConfigured() {
       return Boolean(this.phone && this.twilio.sid && this.twilio.token && this.twilio.from);
+    },
+    get configured() {
+      return this.emailConfigured || this.smsConfigured;
     },
   },
 
