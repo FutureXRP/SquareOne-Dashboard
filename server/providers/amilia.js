@@ -167,6 +167,32 @@ amiliaRouter.get(
       sampleOf(`/locations`),
     ]);
 
+    // Fee-basis check: for every populated membership, report headcount plus what
+    // each candidate fee-counting strategy yields, so we can see which one matches
+    // the real number of memberships sold (per the org's Membership Management).
+    const feeCheck = await Promise.all(
+      mList.map(async (m) => {
+        const id = m.Id ?? m.id;
+        const { items, total, via } = await fetchPersons(id, jwt);
+        if (!total) return { membership: m.Name ?? id, headcount: 0 };
+        const subs = await countSubscriptions(id, jwt);
+        const flags = OWNER_FLAGS.filter((f) => items[0] && f in items[0])
+          .map((f) => ({ flag: f, trueCount: items.filter((p) => p[f] === true).length }));
+        const accounts = ACCOUNT_KEYS.filter((k) => items[0] && items[0][k] != null)
+          .map((k) => ({ key: k, distinct: new Set(items.map((p) => p[k]).filter((v) => v != null)).size }));
+        const chosen = subs
+          ? { fees: subs.count, basis: `subscriptions:${subs.via}` }
+          : (feesFromPersons(items) ?? { fees: total, basis: "headcount" });
+        return {
+          membership: m.Name ?? id, headcount: total, personsVia: via,
+          personKeys: keys(items[0]),
+          subscriptions: subs ?? "not exposed",
+          ownerFlags: flags, accountKeys: accounts,
+          chosen,
+        };
+      })
+    );
+
     // Discovery: which other feeds exist (status + count only) for future tabs.
     const probe = async (path) => {
       try {
@@ -190,6 +216,7 @@ amiliaRouter.get(
       memberships: { count: mList.length, itemKeys: keys(mList[0]), sample: mList[0] ?? null, paging: memberships?.Paging ?? null, error: memberships?.error },
       membershipPersons: { itemKeys: keys(unwrap(persons)[0]), sample: unwrap(persons)[0] ?? null, paging: persons?.Paging ?? null, error: persons?.error },
       membershipSubscriptions: { itemKeys: keys(unwrap(subscriptions)[0]), sample: unwrap(subscriptions)[0] ?? null, paging: subscriptions?.Paging ?? null, error: subscriptions?.error },
+      feeCheck,
       events: { count: eList.length, itemKeys: keys(eList[0]), sample: eList[0] ?? null, paging: events?.Paging ?? null, error: events?.error },
       reservationsWide, eventsWide, locations,
       discovery: probes,
@@ -217,26 +244,31 @@ amiliaRouter.get(
       const { items, total: count } = await fetchPersons(id, jwt);
 
       // Number of fees this membership generates. A family plan bills once per
-      // family, so we must not multiply price by headcount. Prefer subscriptions
-      // sold, then primary-member/distinct-account counts, then fall back to
-      // headcount only when Amilia gives us nothing to collapse on.
+      // family, so we must not multiply price by headcount. Priority:
+      //   AMILIA_FEE_OVERRIDES env var (owner-verified truth) > subscriptions
+      //   sold > primary-member/distinct-account counts > headcount fallback.
       // Empty plans (offered but nobody on them) bill nothing — skip the probing.
-      const subs = count === 0 ? null : await countSubscriptions(id, jwt);
+      const name = m.Name ?? m.name ?? `Membership ${id}`;
+      const override = config.amilia.feeOverrides.find((o) => name.toLowerCase().startsWith(o.prefix));
       let fees, basis;
       if (count === 0) {
         fees = 0; basis = "empty";
-      } else if (subs) {
-        ({ count: fees } = subs); basis = `subscriptions (${subs.via.split("/").pop()})`;
+      } else if (override) {
+        fees = override.count; basis = "override (AMILIA_FEE_OVERRIDES)";
       } else {
-        const fp = feesFromPersons(items);
-        if (fp) ({ fees, basis } = fp);
-        else { fees = count; basis = "headcount"; }
+        const subs = await countSubscriptions(id, jwt);
+        if (subs) { ({ count: fees } = subs); basis = `subscriptions (${subs.via.split("/").pop()})`; }
+        else {
+          const fp = feesFromPersons(items);
+          if (fp) ({ fees, basis } = fp);
+          else { fees = count; basis = "headcount"; }
+        }
       }
 
       const revenue = price * fees;
       total += count;
       projectedRevenue += revenue;
-      byType.push({ type: m.Name ?? m.name ?? `Membership ${id}`, count, fees, price, revenue, basis });
+      byType.push({ type: name, count, fees, price, revenue, basis });
     }
 
     return {

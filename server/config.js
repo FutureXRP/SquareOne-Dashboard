@@ -24,6 +24,15 @@ function parseEntities(raw) {
   catch { console.warn("HA_ENTITIES is not valid JSON — using defaults"); return null; }
 }
 
+// "Family Fitness=4;SquareOne Interactive=2" -> [{ prefix: "family fitness", count: 4 }, ...]
+function parseFeeOverrides(raw) {
+  return raw.split(";").map((pair) => {
+    const [name, n] = pair.split("=").map((s) => s?.trim());
+    const count = Number(n);
+    return name && n && Number.isFinite(count) ? { prefix: name.toLowerCase(), count } : null;
+  }).filter(Boolean);
+}
+
 // All secrets come from environment variables (see .env.example). Nothing is
 // hardcoded and nothing reaches the browser bundle. A provider is considered
 // "configured" only when its required vars are present.
@@ -40,6 +49,10 @@ export const config = {
     jwt: process.env.AMILIA_JWT || "",
     orgId: process.env.AMILIA_ORG_ID || "",
     lang: process.env.AMILIA_LANG || "en",
+    // Optional: true fee counts per plan when Amilia can't be derived from the API.
+    // Format: "Plan Name=count;Other Plan=count" (name match is case-insensitive,
+    // 'starts with' — so "Family Fitness=4" matches "Family Fitness Membership").
+    feeOverrides: parseFeeOverrides(process.env.AMILIA_FEE_OVERRIDES || ""),
     get configured() {
       return Boolean(this.orgId && (this.jwt || (this.email && this.password)));
     },
