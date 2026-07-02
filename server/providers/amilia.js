@@ -224,14 +224,33 @@ amiliaRouter.get(
   })
 );
 
+// The default /memberships list excludes archived (discontinued) plans, but a
+// discontinued plan can still have grandfathered members paying its fee. Try the
+// archived-list variants and merge any extra plans found (dedup by Id).
+async function listMemberships(jwt) {
+  const base = await get("/memberships", jwt);
+  const list = [...(base?.Items || (Array.isArray(base) ? base : []))];
+  const seen = new Set(list.map((m) => m.Id ?? m.id));
+  for (const q of ["?showArchived=true", "?isArchived=true", "?includeArchived=true"]) {
+    try {
+      const r = await get(`/memberships${q}`, jwt);
+      const extra = (r?.Items || (Array.isArray(r) ? r : [])).filter((m) => !seen.has(m.Id ?? m.id));
+      if (extra.length) {
+        extra.forEach((m) => { seen.add(m.Id ?? m.id); list.push({ ...m, IsArchived: true }); });
+        break; // one working variant is enough
+      }
+    } catch { /* unsupported param — try the next */ }
+  }
+  return list;
+}
+
 // Membership summary. Each "membership" is a type/tier; per-type counts come from
 // the Paging.TotalCount of its persons list.
 amiliaRouter.get(
   "/members/summary",
   guard("amilia", async () => {
     const jwt = await getJwt();
-    const memberships = await get("/memberships", jwt);
-    const list = memberships?.Items || memberships || [];
+    const list = await listMemberships(jwt);
 
     const byType = [];
     let total = 0;
@@ -242,6 +261,10 @@ amiliaRouter.get(
 
       // Headcount (people covered) — shown in the UI.
       const { items, total: count } = await fetchPersons(id, jwt);
+
+      // Discontinued plans: keep them while grandfathered members still pay the
+      // fee (tagged legacy below), drop them for good once nobody's left.
+      if (m.IsArchived && count === 0) continue;
 
       // Number of fees this membership generates. Verified against this org's
       // live data (2026-07): person records carry AccountId, and for the
@@ -268,7 +291,7 @@ amiliaRouter.get(
       const revenue = price * fees;
       total += count;
       projectedRevenue += revenue;
-      byType.push({ type: name, count, fees, price, revenue, basis });
+      byType.push({ type: name, count, fees, price, revenue, basis, legacy: Boolean(m.IsArchived) });
     }
 
     return {

@@ -567,7 +567,11 @@ function Members({ members, live }) {
         {activePlans.map((t) => (
           <div key={t.type} style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
             <div className="flex items-center justify-between gap-3" style={{ fontSize: 13.5, marginBottom: 6 }}>
-              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.type}</span>
+              <span className="flex items-center gap-2" style={{ minWidth: 0, overflow: "hidden" }}>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.type}</span>
+                {/* Discontinued plan kept alive by grandfathered members. */}
+                {t.legacy && <span style={{ fontSize: 10, fontFamily: mono, color: C.dim, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>LEGACY</span>}
+              </span>
               <span className="flex items-center gap-3" style={{ fontFamily: mono, flexShrink: 0 }}>
                 {t.price != null && <span style={{ color: C.dim, fontSize: 12 }}>{fmtMoney(t.price)} ea</span>}
                 {/* When a plan bills once per family, show fees × people so the math is clear. */}
