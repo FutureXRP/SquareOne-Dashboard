@@ -3,6 +3,7 @@ import { config, guard } from "../config.js";
 import { requireAuth, logAudit } from "../auth.js";
 import { fetchReservations } from "./amilia.js";
 import { haConfigured, haOps } from "../haService.js";
+import { checkNewMembers } from "./memberAlerts.js";
 
 export const doorsRouter = Router();
 
@@ -190,6 +191,9 @@ doorsRouter.all(
       }
     );
 
-    return { at: new Date(now).toISOString(), hubLive: live, spanCount: spans.length, actions };
+    // Same tick also watches for new members (SMS alert) — never fails the tick.
+    const memberAlerts = await checkNewMembers(req);
+
+    return { at: new Date(now).toISOString(), hubLive: live, spanCount: spans.length, actions, memberAlerts };
   })
 );
