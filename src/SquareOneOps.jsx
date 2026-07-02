@@ -44,14 +44,20 @@ const LivePlayer = lazy(() => import("./LivePlayer.jsx").then((m) => ({ default:
   production call it should make. Flip CONNECTED.* to true as each goes live.
 */
 
+// Palette reskinned to the SquareOne Compassion brand (squareonecompassion.com):
+// a navy-tinted dark base with brand blue as the primary accent and brand orange
+// as the secondary accent. Keys are unchanged so existing usages keep working —
+// only the values shifted. `cyan` now carries SquareOne blue; `amber` carries the
+// brand's orange divider color; `navy` is the deep brand navy for headers.
 const C = {
-  bg: "#0B0F14", panel: "#131A22", panel2: "#1A232E", panelHi: "#202C39",
-  border: "#243140", borderHi: "#33465A",
-  text: "#E8EDF2", mid: "#92A2B3", dim: "#5C6B7A",
+  bg: "#0A0F1A", panel: "#111A28", panel2: "#16212F", panelHi: "#1D2A3A",
+  border: "#243449", borderHi: "#35496180",
+  text: "#EAF0F6", mid: "#93A6BC", dim: "#5D6E82",
   go: "#3DBC8A", goBg: "#11251F",
-  cyan: "#52BECF", cyanBg: "#0E2329",
-  amber: "#E0A33E", amberBg: "#241B0E",
+  cyan: "#3B9BE8", cyanBg: "#0E2334",       // SquareOne brand blue
+  amber: "#E8833A", amberBg: "#251708",     // SquareOne brand orange
   red: "#E0564B", redBg: "#26110F",
+  navy: "#16345F",                          // deep brand navy
 };
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
@@ -166,12 +172,12 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
       `}</style>
 
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 16px 64px" }}>
-        {/* Masthead */}
-        <header className="flex items-center justify-between" style={{ padding: "20px 0 14px", borderBottom: `1px solid ${C.border}` }}>
+        {/* Masthead — brand orange stripe under the header echoes the divider on squareonecompassion.com */}
+        <header className="flex items-center justify-between" style={{ padding: "20px 0 14px", borderBottom: `1px solid ${C.border}`, boxShadow: `0 1px 0 0 ${C.amber}` }}>
           <div className="flex items-center gap-3">
-            <BrandLogo size={32} fallbackColor={C.cyan} />
+            <BrandLogo size={34} fallbackColor={C.cyan} />
             <div>
-              <div style={{ fontSize: 11, letterSpacing: 3, color: C.mid, fontFamily: mono, textTransform: "uppercase" }}>SquareOne</div>
+              <div style={{ fontSize: 11, letterSpacing: 3, color: C.cyan, fontFamily: mono, textTransform: "uppercase", fontWeight: 600 }}>SquareOne Compassion</div>
               <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>Operations Center</div>
             </div>
           </div>
