@@ -220,9 +220,12 @@ amiliaRouter.get(
       // family, so we must not multiply price by headcount. Prefer subscriptions
       // sold, then primary-member/distinct-account counts, then fall back to
       // headcount only when Amilia gives us nothing to collapse on.
-      const subs = await countSubscriptions(id, jwt);
+      // Empty plans (offered but nobody on them) bill nothing — skip the probing.
+      const subs = count === 0 ? null : await countSubscriptions(id, jwt);
       let fees, basis;
-      if (subs) {
+      if (count === 0) {
+        fees = 0; basis = "empty";
+      } else if (subs) {
         ({ count: fees } = subs); basis = `subscriptions (${subs.via.split("/").pop()})`;
       } else {
         const fp = feesFromPersons(items);
