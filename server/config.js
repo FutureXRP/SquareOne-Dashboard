@@ -110,6 +110,22 @@ export const config = {
     cronSecret: process.env.CRON_SECRET || "",
   },
 
+  // Booking-driven climate: bring each room to an "event" setpoint ahead of its
+  // reservation, revert to an "idle" setpoint after — overlapping events in the
+  // same zone hold the event setpoint until the last one clears. Executed by the
+  // same /api/doors/run cron tick as the door schedule.
+  climate: {
+    preMin: Number(process.env.CLIMATE_PRE_LEAD_MIN || 60),   // condition N min before start
+    postMin: Number(process.env.CLIMATE_POST_LAG_MIN || 60),  // set back N min after end
+    eventTemp: Number(process.env.CLIMATE_EVENT_TEMP || 71),  // occupied setpoint (°F)
+    idleTemp: Number(process.env.CLIMATE_IDLE_TEMP || 78),    // setback setpoint (°F)
+    // Explicit room -> zone mapping, JSON: {"Gym/Auditorium": "fit"} (values are
+    // zone ids from HA_ENTITIES). Unmapped rooms fall back to fuzzy name match.
+    map: parseJsonEnv("CLIMATE_BOOKING_MAP") || {},
+    // Per-zone setpoint overrides, JSON: {"fit": {"event": 68, "idle": 78}}
+    setpoints: parseJsonEnv("CLIMATE_SETPOINTS") || {},
+  },
+
   // The on-site hub: Home Assistant adapts the LAN devices (Gemini alarm,
   // Pro1 HVAC, GV-Access doors) and exposes one REST API.
   // Create a long-lived access token in HA: Profile -> Security -> Long-lived
