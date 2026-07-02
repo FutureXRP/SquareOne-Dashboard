@@ -24,6 +24,13 @@ function parseEntities(raw) {
   catch { console.warn("HA_ENTITIES is not valid JSON — using defaults"); return null; }
 }
 
+function parseJsonEnv(name) {
+  const raw = process.env[name];
+  if (!raw) return null;
+  try { return JSON.parse(raw); }
+  catch { console.warn(`${name} is not valid JSON — ignoring`); return null; }
+}
+
 // "Family Fitness=4;SquareOne Interactive=2" -> [{ prefix: "family fitness", count: 4 }, ...]
 function parseFeeOverrides(raw) {
   return raw.split(";").map((pair) => {
@@ -86,6 +93,21 @@ export const config = {
     get configured() {
       return Boolean(this.apiKey);
     },
+  },
+
+  // Booking-driven door schedule: unlock each access-controlled room before its
+  // Amilia reservation starts and relock after it ends. Executed by /api/doors/run,
+  // which a scheduler (GitHub Actions cron / cron-job.org) hits every few minutes.
+  doors: {
+    leadMin: Number(process.env.DOOR_UNLOCK_LEAD_MIN || 20),   // unlock N min before start
+    lagMin: Number(process.env.DOOR_RELOCK_LAG_MIN || 30),     // relock N min after end
+    lookbackMin: Number(process.env.DOOR_CRON_LOOKBACK_MIN || 30), // catch-up window for missed ticks
+    // Explicit room -> door mapping, JSON: {"Gym/Auditorium": "fit", "Party Room": "main"}
+    // (keys match Amilia location names, values are door ids from HA_ENTITIES).
+    // Rooms not mapped here fall back to fuzzy name matching against door names.
+    map: parseJsonEnv("DOOR_BOOKING_MAP") || {},
+    // Shared secret the scheduler must send (Authorization: Bearer <secret>).
+    cronSecret: process.env.CRON_SECRET || "",
   },
 
   // The on-site hub: Home Assistant adapts the LAN devices (Gemini alarm,

@@ -1,0 +1,33 @@
+# Fires the booking-driven door reconciler (/api/doors/run) every 5 minutes.
+# The endpoint unlocks each access-controlled room 20 min before its Amilia
+# reservation and relocks it 30 min after (see server/providers/doorSchedule.js).
+#
+# One-time setup — repo Settings -> Secrets and variables -> Actions:
+#   DASHBOARD_URL  e.g. https://square-one-dashboard.vercel.app
+#   CRON_SECRET    any long random string; set the SAME value in Vercel env vars
+#
+# Note: GitHub schedules are best-effort and can run a few minutes late — the
+# endpoint's lookback window (default 30 min) absorbs that.
+name: Door schedule tick
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Run door reconciler
+        env:
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$DASHBOARD_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "DASHBOARD_URL / CRON_SECRET secrets not set — skipping."
+            exit 0
+          fi
+          curl -fsS -X POST "$DASHBOARD_URL/api/doors/run" \
+            -H "Authorization: Bearer $CRON_SECRET"

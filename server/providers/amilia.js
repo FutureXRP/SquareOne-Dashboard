@@ -306,17 +306,23 @@ amiliaRouter.get(
   })
 );
 
+// Raw reservation items for a date window — shared with the door scheduler
+// (server/providers/doorSchedule.js).
+export async function fetchReservations(from, to) {
+  const jwt = await getJwt();
+  const res = await get(`/reservations?from=${from}&to=${to}`, jwt);
+  return res?.Items || (Array.isArray(res) ? res : []) || [];
+}
+
 // Facility bookings from Amilia's reservations feed (confirmed valid endpoint).
 // Defaults to an upcoming 14-day window since same-day reservations are often 0.
 amiliaRouter.get(
   "/bookings",
   guard("amilia", async (req) => {
-    const jwt = await getJwt();
     const from = req.query.from || isoDay(0);
     const to = req.query.to || isoDay(89); // reservations are sparse — show a 90-day window
-    let res = null;
-    try { res = await get(`/reservations?from=${from}&to=${to}`, jwt); } catch { /* fall through to empty */ }
-    const items = res?.Items || (Array.isArray(res) ? res : []) || [];
+    let items = [];
+    try { items = await fetchReservations(from, to); } catch { /* fall through to empty */ }
 
     const norm = items.map((r, i) => {
       const start = r.Start || r.StartDate || r.start;

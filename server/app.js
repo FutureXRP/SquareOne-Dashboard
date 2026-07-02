@@ -7,6 +7,7 @@ import { hikRouter } from "./providers/hik.js";
 import { procareRouter } from "./providers/procare.js";
 import { hubRouter } from "./providers/homeassistant.js";
 import { assistantRouter } from "./providers/assistant.js";
+import { doorsRouter } from "./providers/doorSchedule.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -37,5 +38,8 @@ app.use("/api/hik", requireAuth, hikRouter);
 app.use("/api/procare", requireAuth, procareRouter);
 app.use("/api/hub", requireAuth, hubRouter);
 app.use("/api/assistant", requireAuth, assistantRouter);
+// Door schedule handles its own auth per-route: /schedule wants a signed-in
+// user, /run wants the cron secret (a scheduler can't sign in).
+app.use("/api/doors", doorsRouter);
 
 export default app;
