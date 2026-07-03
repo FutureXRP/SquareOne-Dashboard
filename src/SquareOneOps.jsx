@@ -397,6 +397,7 @@ function SettingsPage({ user, authEnabled, role, tabPrefs = {}, onTabPrefs }) {
 const PROBES = [
   { key: "geovision", label: "GV-Access Doors", path: "/api/geovision/debug" },
   { key: "geovision-login", label: "GV-Access Login Test (deep)", path: "/api/geovision/login-probe" },
+  { key: "geovision-discover", label: "GV-Access Discover Doors", path: "/api/geovision/discover" },
   { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },

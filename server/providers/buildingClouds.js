@@ -2,6 +2,51 @@ import { Router } from "express";
 import { config, guard } from "../config.js";
 import { requireAdmin } from "../auth.js";
 import { credsFor } from "./userCreds.js";
+import { getCachedToken, setCachedToken } from "../tokenStore.js";
+
+/*
+  GeoVision GV-ASManager (ASWeb) session login — CONFIRMED by probing:
+    POST form  username=<u>&password=<p>  to  /asweb/Login/Login.srf
+    success -> 302 to /asweb/ with Set-Cookie: GvWebSessionID=...
+  We cache the cookie header and attach it to subsequent ASWeb calls.
+*/
+const gvScope = () => (config.geovision.baseUrl || "default");
+
+// Turn a fetch response's Set-Cookie headers into a "name=value; name=value" jar.
+function cookieJar(res) {
+  const list = res.headers.getSetCookie?.() || (res.headers.get("set-cookie") ? [res.headers.get("set-cookie")] : []);
+  return list.map((c) => c.split(";")[0]).filter(Boolean).join("; ");
+}
+
+async function gvLogin(force = false) {
+  const c = config.geovision;
+  if (!force) {
+    const cached = await getCachedToken("geovision-session", gvScope());
+    if (cached) return cached.token;
+  }
+  const res = await fetch(`${c.baseUrl}/asweb/Login/Login.srf`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "*/*" },
+    body: new URLSearchParams({ username: c.username, password: c.password }).toString(),
+    redirect: "manual",
+    signal: AbortSignal.timeout(9000),
+  });
+  // Success is a 302 to /asweb/ that sets GvWebSessionID; a 200 means the login
+  // page was returned (bad credentials).
+  const jar = cookieJar(res);
+  if (res.status !== 302 || !/GvWebSessionID/i.test(jar)) {
+    throw new Error("GeoVision login failed — check GV_USERNAME / GV_PASSWORD (and that the server is reachable).");
+  }
+  // ASWeb sessions are short-lived; cache ~8 min and re-login as needed.
+  await setCachedToken("geovision-session", gvScope(), jar, {}, Date.now() + 8 * 60 * 1000);
+  return jar;
+}
+
+// Authenticated GET against ASWeb, retrying once with a fresh login on 401/302.
+async function gvGet(path, cookie) {
+  const c = config.geovision;
+  return fetch(`${c.baseUrl}${path}`, { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(9000) });
+}
 
 /*
   Building-system cloud providers: Pro1 thermostats, Napco alarm (iBridge/Prima),
@@ -212,5 +257,36 @@ geovisionRouter.get(
     const pages = [await pageOf("/asweb/Login/"), await pageOf("/asweb/")];
 
     return { base: c.baseUrl, account: u, attempts: attempts.slice(0, 8), pages };
+  })
+);
+
+// Authenticated discovery: log in, then read the ASWeb app shell + likely index
+// handlers to surface the door-list and door-control endpoints (.srf / api refs).
+geovisionRouter.get(
+  "/discover",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true); // fresh login
+    const look = async (path) => {
+      try {
+        const res = await gvGet(path, cookie);
+        const text = await res.text();
+        const refs = [...new Set((text.match(/[A-Za-z0-9_./-]+\.srf/gi) || []))].slice(0, 60);
+        const apis = [...new Set((text.match(/[/"'][A-Za-z0-9_./-]*(door|controller|device|access|open|status|monitor)[A-Za-z0-9_./-]*/gi) || []))]
+          .map((s) => s.replace(/^["']/, "")).slice(0, 60);
+        const looksJson = (res.headers.get("content-type") || "").includes("json");
+        return {
+          path, status: res.status, ctype: res.headers.get("content-type"), len: text.length,
+          srf: refs, hints: apis,
+          sample: looksJson ? text.slice(0, 400) : undefined,
+          raw: looksJson ? undefined : text.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…").slice(0, 900),
+        };
+      } catch (e) { return { path, error: e.message }; }
+    };
+    const pages = [];
+    for (const p of ["/asweb/", "/asweb/index.srf", "/asweb/Main/", "/asweb/Monitor/", "/asweb/api/door/list", "/asweb/Door/GetList.srf"]) {
+      pages.push(await look(p));
+    }
+    return { loggedIn: true, base: config.geovision.baseUrl, pages };
   })
 );
