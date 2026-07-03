@@ -3,10 +3,10 @@ import { ShieldCheck, Mail, Lock, Loader2 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 import { BrandLogo } from "./BrandLogo.jsx";
 
-// Matches the SquareOne brand palette in SquareOneOps.jsx (brand blue accent).
+// Matches the light "Workspace" palette in SquareOneOps.jsx.
 const C = {
-  bg: "#0A0F1A", panel: "#111A28", panel2: "#16212F", border: "#243449", borderHi: "#354961",
-  text: "#EAF0F6", mid: "#93A6BC", dim: "#5D6E82", cyan: "#3B9BE8", go: "#3DBC8A", red: "#E0564B",
+  bg: "#F4F7FB", panel: "#FFFFFF", panel2: "#F1F5FA", border: "#E3E9F1", borderHi: "#CBD6E3",
+  text: "#1B2432", mid: "#5B6675", dim: "#8492A2", cyan: "#2E7BC4", go: "#2F9E6F", red: "#D84B40",
 };
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
