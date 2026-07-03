@@ -73,6 +73,15 @@ export function useDashboardData(mock) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Keep the numbers fresh without a manual refresh: re-fetch every 2 minutes
+  // while the tab is visible, and immediately when the user comes back to it.
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === "visible") load(); };
+    const id = setInterval(tick, 120_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, [load]);
+
   // Snapshot URL only resolves to the proxy when Hik is live; else null (preview tile).
   const snapshotUrl = useCallback(
     (id) => (connected.hik ? `/api/hik/cameras/${id}/snapshot.jpg` : null),

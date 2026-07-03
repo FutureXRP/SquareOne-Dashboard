@@ -139,6 +139,33 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
   const { bookings, members, cameras, elc, connected, usingMock, reload, snapshotUrl } =
     useDashboardData({ bookings: MOCK_BOOKINGS, members: MOCK_MEMBERS, cameras: MOCK_CAMERAS, elc: MOCK_ELC });
 
+  /* ---- New-member sign-up feed ----
+     Polls the rate-limited /api/alerts/check every 90s while the tab is
+     visible: the server diffs the Amilia roster (at most ~once a minute
+     globally) and returns the recent sign-up feed. New arrivals land in the
+     activity log and the Alerts tab.                                          */
+  const [memberSignups, setMemberSignups] = useState([]);
+  const lastSignupRef = useRef(undefined); // undefined = first poll (seed silently)
+  useEffect(() => {
+    let stop = false;
+    const poll = async () => {
+      try {
+        const r = await apiFetch("/api/alerts/check", { method: "POST" }).then((res) => res.json());
+        if (stop || !r?.ok) return;
+        const recent = r.data?.recent || [];
+        setMemberSignups(recent);
+        const newest = recent[0]?.at ?? null;
+        if (lastSignupRef.current !== undefined && newest && newest !== lastSignupRef.current) {
+          pushLog(`🎉 ${recent[0].count === 1 ? "New member" : `${recent[0].count} new members`}: ${recent[0].members.join(", ")}`, "ok");
+        }
+        lastSignupRef.current = newest;
+      } catch { /* offline/preview — feed just stays empty */ }
+    };
+    poll();
+    const id = setInterval(() => { if (document.visibilityState === "visible") poll(); }, 90_000);
+    return () => { stop = true; clearInterval(id); };
+  }, [pushLog]);
+
   const [opening, setOpening] = useState(
     ["Unlock doors", "Disarm alarm", "HVAC to day mode", "Coffee started", "TVs on", "Golf sim ready", "Music playing"].map((l, i) => ({ id: i, label: l, done: false }))
   );
@@ -196,7 +223,8 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         <nav className="flex gap-1" style={{ margin: "16px 0", borderBottom: `1px solid ${C.border}`, overflowX: "auto" }}>
           {TABS.map(([id, label, Icon]) => {
             const active = tab === id;
-            const alert = id === "alerts" && zones.some((z) => Math.abs(z.now - z.set) > 2);
+            const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
+            const alert = id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup);
             return (
               <button key={id} onClick={() => setTab(id)} className="so-tab flex items-center gap-2 whitespace-nowrap"
                 style={{ background: "transparent", border: "none", padding: "10px 14px", cursor: "pointer",
@@ -218,7 +246,7 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
         {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
         {tab === "automation" && <Automation />}
-        {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} />}
+        {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
         {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
       </div>
     </div>
@@ -845,7 +873,7 @@ function Automation() {
 }
 
 /* ------------------------------ ALERTS ------------------------------ */
-function Alerts({ zones, doors, cameras, elc }) {
+function Alerts({ zones, doors, cameras, elc, memberSignups = [] }) {
   const alerts = [];
   zones.forEach((z) => { if (Math.abs(z.now - z.set) > 2) alerts.push({ sev: "warn", msg: `${z.name} is ${z.now}° (set ${z.set}°)` }); });
   doors.forEach((d) => { if (!d.locked) alerts.push({ sev: "warn", msg: `${d.name} is unlocked` }); });
@@ -854,6 +882,22 @@ function Alerts({ zones, doors, cameras, elc }) {
   const watch = ["HVAC offline", "Alarm comms failure", "Freezer high temp", "Water leak", "Power outage", "Internet down", "Camera offline", "ELC ratio low"];
   return (
     <div className="grid gap-3">
+      {memberSignups.length > 0 && (
+        <Panel title="Member Sign-ups" accent={C.go}>
+          {memberSignups.map((s, i) => (
+            <div key={s.at + i} className="flex items-center gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13.5 }}>
+              <span style={{ fontFamily: mono, color: C.mid, fontSize: 12, minWidth: 130 }}>
+                {new Date(s.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </span>
+              <UserCheck size={15} color={C.go} style={{ flexShrink: 0 }} />
+              <span style={{ minWidth: 0 }}>
+                {s.count === 1 ? "New member: " : `${s.count} new members: `}
+                {s.members.join(", ")}{s.more ? ` +${s.more} more` : ""}
+              </span>
+            </div>
+          ))}
+        </Panel>
+      )}
       <Panel title={`Active · ${alerts.length}`} accent={alerts.length ? C.amber : C.go}>
         {alerts.length === 0 ? (
           <div className="flex items-center gap-2" style={{ color: C.go, padding: "8px 0", fontSize: 14 }}><CircleCheck size={17} /> All clear — nothing needs attention.</div>
