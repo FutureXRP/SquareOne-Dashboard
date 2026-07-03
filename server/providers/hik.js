@@ -90,22 +90,56 @@ async function getToken() {
   return fetchToken();
 }
 
-// List cameras with online status. status: 1 = online, 0 = offline.
+// Fetch every page of an EZVIZ list endpoint (they page at pageStart/pageSize).
+async function listAll(path, accessToken, areaDomain, pageSize = 50) {
+  const all = [];
+  for (let pageStart = 0, i = 0; i < 40; i++, pageStart += pageSize) {
+    const data = await ezvizPost(path, { accessToken, pageStart, pageSize }, areaDomain);
+    const list = Array.isArray(data) ? data : [];
+    all.push(...list);
+    if (list.length < pageSize) break;
+  }
+  return all;
+}
+
+// A camera id is "deviceSerial" for standalone cameras, or "deviceSerial_chN"
+// for a channel behind an NVR/DVR. Parse it back for snapshot/live calls.
+function parseCamId(id) {
+  const i = String(id).lastIndexOf("_");
+  if (i > 0) {
+    const ch = Number(id.slice(i + 1));
+    if (Number.isFinite(ch)) return { deviceSerial: id.slice(0, i), channelNo: ch };
+  }
+  return { deviceSerial: id, channelNo: 1 };
+}
+
+// List cameras. An NVR/DVR is ONE device but many cameras, so we enumerate
+// CHANNELS via /camera/list (each channel = one camera) rather than /device/list.
+// Falls back to the device list if the account exposes no channel data.
 hikRouter.get(
   "/cameras",
   guard("hik", async () => {
     const { accessToken, areaDomain } = await getToken();
-    const all = [];
-    let pageStart = 0;
-    const pageSize = 50;
-    for (let i = 0; i < 20; i++) {
-      const data = await ezvizPost("/api/lapp/device/list", { accessToken, pageStart, pageSize }, areaDomain);
-      const list = Array.isArray(data) ? data : [];
-      all.push(...list);
-      if (list.length < pageSize) break;
-      pageStart += pageSize;
+    const cams = await listAll("/api/lapp/camera/list", accessToken, areaDomain);
+    if (cams.length) {
+      return cams.map((c) => {
+        const ch = Number(c.channelNo);
+        // Only suffix the channel when it's a real sub-channel (NVR); a
+        // standalone camera reports channelNo 1 and keeps its bare serial.
+        const id = ch && ch !== 1 ? `${c.deviceSerial}_${ch}` : c.deviceSerial;
+        return {
+          id,
+          name: c.channelName || c.deviceName || c.deviceSerial,
+          online: Number(c.status) === 1,
+          recording: Number(c.status) === 1,
+          encrypted: Number(c.isEncrypt) === 1,
+          motion: "—",
+        };
+      });
     }
-    return all.map((d) => ({
+    // Fallback: device-level list.
+    const devices = await listAll("/api/lapp/device/list", accessToken, areaDomain);
+    return devices.map((d) => ({
       id: d.deviceSerial,
       name: d.deviceName || d.deviceSerial,
       online: Number(d.status) === 1,
@@ -121,9 +155,10 @@ hikRouter.get(
   "/cameras/:id/snapshot.jpg",
   guard("hik", async (req, res) => {
     const { accessToken, areaDomain } = await getToken();
+    const { deviceSerial, channelNo } = parseCamId(req.params.id);
     const data = await ezvizPost(
       "/api/lapp/device/capture",
-      { accessToken, deviceSerial: req.params.id, channelNo: 1, code: codeFor(req.params.id) },
+      { accessToken, deviceSerial, channelNo, code: codeFor(deviceSerial) },
       areaDomain
     );
     if (!data?.picUrl) throw new Error("no picUrl returned (camera may be offline)");
@@ -141,9 +176,10 @@ hikRouter.get(
   "/cameras/:id/live",
   guard("hik", async (req) => {
     const { accessToken, areaDomain } = await getToken();
+    const { deviceSerial, channelNo } = parseCamId(req.params.id);
     const data = await ezvizPost(
       "/api/lapp/live/address/get",
-      { accessToken, deviceSerial: req.params.id, channelNo: 1, protocol: 2, quality: 1, code: codeFor(req.params.id) },
+      { accessToken, deviceSerial, channelNo, protocol: 2, quality: 1, code: codeFor(deviceSerial) },
       areaDomain
     );
     return { url: data?.url, expireTime: data?.expireTime };
@@ -180,6 +216,18 @@ hikRouter.get(
       };
     } catch (e) {
       out.devices = { ok: false, error: e.message };
+    }
+    // Channel-level list — this is where the NVR/DVR cameras show up.
+    try {
+      const cams = await ezvizPost("/api/lapp/camera/list", { accessToken, pageStart: 0, pageSize: 50 }, areaDomain);
+      const list = Array.isArray(cams) ? cams : [];
+      out.cameras = {
+        count: list.length,
+        itemKeys: list[0] ? Object.keys(list[0]) : [],
+        list: list.map((c) => ({ deviceSerial: c.deviceSerial, channelNo: c.channelNo, channelName: c.channelName, status: c.status, isEncrypt: c.isEncrypt })),
+      };
+    } catch (e) {
+      out.cameras = { ok: false, error: e.message };
     }
     return out;
   })
