@@ -95,24 +95,31 @@ export const config = {
     },
   },
 
-  // Napco alarm cloud (iBridge or Prima app account; set NAPCO_APP accordingly).
+  // Napco alarm cloud. The building uses the "Gemini" commercial app (StarLink
+  // Connect communicator), which logs in with a USERNAME (e.g. "Mat4185"), not
+  // an email. NAPCO_EMAIL still accepted as an alias for the username field.
   napco: {
     baseUrl: process.env.NAPCO_BASE_URL || "",
-    app: (process.env.NAPCO_APP || "ibridge").toLowerCase(), // "ibridge" | "prima"
-    email: process.env.NAPCO_EMAIL || "",
+    app: (process.env.NAPCO_APP || "gemini").toLowerCase(), // "gemini" | "ibridge" | "prima"
+    username: process.env.NAPCO_USERNAME || process.env.NAPCO_EMAIL || "",
     password: process.env.NAPCO_PASSWORD || "",
+    get email() { return this.username; }, // probe helper reads .email
     get configured() {
-      return Boolean(this.email && this.password);
+      return Boolean(this.username && this.password);
     },
   },
 
-  // GeoVision GV-Cloud Access Control (web portal login).
+  // GeoVision doors. The building runs the GV-Access mobile app against an
+  // on-prem GV-ASManager server (named "SQONE") with Controller 1 & 2. Since
+  // the app works remotely, that server is reachable over the internet — set
+  // GV_BASE_URL to the same host/DDNS + port the GV-Access app connects to.
   geovision: {
-    baseUrl: process.env.GV_BASE_URL || "https://www.gvaicloud.com",
-    email: process.env.GV_EMAIL || "",
+    baseUrl: process.env.GV_BASE_URL || "", // e.g. https://sqone.ddns.net:port
+    username: process.env.GV_USERNAME || process.env.GV_EMAIL || "",
     password: process.env.GV_PASSWORD || "",
+    get email() { return this.username; }, // probe helper reads .email
     get configured() {
-      return Boolean(this.email && this.password);
+      return Boolean(this.baseUrl && this.username && this.password);
     },
   },
 
