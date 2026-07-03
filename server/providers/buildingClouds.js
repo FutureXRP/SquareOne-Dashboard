@@ -260,33 +260,51 @@ geovisionRouter.get(
   })
 );
 
-// Authenticated discovery: log in, then read the ASWeb app shell + likely index
-// handlers to surface the door-list and door-control endpoints (.srf / api refs).
+// Authenticated discovery: log in, then crawl the ASWeb main app (ASWeb.srf)
+// and its JavaScript bundles to surface the door-list and door-control endpoint
+// names (they live in the app's JS, not in server-rendered HTML).
 geovisionRouter.get(
   "/discover",
   requireAdmin,
   guard("geovision", async () => {
-    const cookie = await gvLogin(true); // fresh login
-    const look = async (path) => {
-      try {
-        const res = await gvGet(path, cookie);
-        const text = await res.text();
-        const refs = [...new Set((text.match(/[A-Za-z0-9_./-]+\.srf/gi) || []))].slice(0, 60);
-        const apis = [...new Set((text.match(/[/"'][A-Za-z0-9_./-]*(door|controller|device|access|open|status|monitor)[A-Za-z0-9_./-]*/gi) || []))]
-          .map((s) => s.replace(/^["']/, "")).slice(0, 60);
-        const looksJson = (res.headers.get("content-type") || "").includes("json");
-        return {
-          path, status: res.status, ctype: res.headers.get("content-type"), len: text.length,
-          srf: refs, hints: apis,
-          sample: looksJson ? text.slice(0, 400) : undefined,
-          raw: looksJson ? undefined : text.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…").slice(0, 900),
-        };
-      } catch (e) { return { path, error: e.message }; }
+    const cookie = await gvLogin(true);
+    const getText = async (path) => {
+      const res = await gvGet(path, cookie);
+      return { status: res.status, ctype: res.headers.get("content-type") || "", text: await res.text() };
     };
-    const pages = [];
-    for (const p of ["/asweb/", "/asweb/index.srf", "/asweb/Main/", "/asweb/Monitor/", "/asweb/api/door/list", "/asweb/Door/GetList.srf"]) {
-      pages.push(await look(p));
+    const absUnder = (base, s) => {
+      if (s.startsWith("http")) return null;               // skip external
+      if (s.startsWith("/")) return s;
+      return base + s.replace(/^\.?\//, "");                // resolve relative to /asweb/
+    };
+
+    // 1. Main app shell.
+    let shell;
+    try { shell = await getText("/asweb/ASWeb.srf"); }
+    catch (e) { return { loggedIn: true, error: `ASWeb.srf: ${e.message}` }; }
+
+    // 2. Its <script src> bundles (resolve relative to /asweb/).
+    const scripts = [...new Set([...shell.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)]
+      .map((m) => absUnder("/asweb/", m[1])).filter(Boolean))].slice(0, 12);
+
+    // 3. Fetch the JS and mine everything for endpoint + door-control clues.
+    const texts = [shell.text];
+    const jsLoaded = [];
+    for (const src of scripts) {
+      try { const r = await getText(src); jsLoaded.push({ src, status: r.status, len: r.text.length }); texts.push(r.text); }
+      catch (e) { jsLoaded.push({ src, error: e.message }); }
     }
-    return { loggedIn: true, base: config.geovision.baseUrl, pages };
+    const blob = texts.join("\n");
+    const srf = [...new Set(blob.match(/[\w./-]+\.srf/gi) || [])].slice(0, 100);
+    const doorEndpoints = [...new Set((blob.match(/["'`][^"'`]*(door|access|open|unlock|controller|output|reader|monitor|getlist|status)[^"'`]*["'`]/gi) || [])
+      .map((s) => s.slice(1, -1)).filter((s) => s.length < 90))].slice(0, 100);
+
+    return {
+      loggedIn: true, base: config.geovision.baseUrl,
+      shell: { status: shell.status, len: shell.text.length },
+      scripts, jsLoaded,
+      srf,                 // every .srf endpoint referenced by the app
+      doorEndpoints,       // strings mentioning door/access/open/controller/etc.
+    };
   })
 );
