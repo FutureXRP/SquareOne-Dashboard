@@ -113,6 +113,29 @@ function parseCamId(id) {
   return { deviceSerial: id, channelNo: 1 };
 }
 
+const camId = (deviceSerial, channelNo) => {
+  const ch = Number(channelNo);
+  // Suffix only real sub-channels (NVR); a standalone camera is channel 1.
+  return ch && ch !== 1 ? `${deviceSerial}_${ch}` : deviceSerial;
+};
+
+// EZVIZ populates each camera with a recent thumbnail (picUrl). We cache the
+// id -> picUrl map (kv, ~2 min) when listing so the snapshot endpoint can fall
+// back to it whenever a live capture fails (e.g. encrypted NVR channels).
+async function cachePicUrls(cams) {
+  const map = {};
+  for (const c of cams) if (c.picUrl) map[camId(c.deviceSerial, c.channelNo)] = c.picUrl;
+  await setCachedToken("hik-pics", tokenScope(), JSON.stringify(map), {}, Date.now() + 150_000);
+  return map;
+}
+async function picUrlFor(id) {
+  const cached = await getCachedToken("hik-pics", tokenScope());
+  if (cached) { try { return JSON.parse(cached.token)[id] || null; } catch { /* refill below */ } }
+  const { accessToken, areaDomain } = await getToken();
+  const map = await cachePicUrls(await listAll("/api/lapp/camera/list", accessToken, areaDomain));
+  return map[id] || null;
+}
+
 // List cameras. An NVR/DVR is ONE device but many cameras, so we enumerate
 // CHANNELS via /camera/list (each channel = one camera) rather than /device/list.
 // Falls back to the device list if the account exposes no channel data.
@@ -122,20 +145,15 @@ hikRouter.get(
     const { accessToken, areaDomain } = await getToken();
     const cams = await listAll("/api/lapp/camera/list", accessToken, areaDomain);
     if (cams.length) {
-      return cams.map((c) => {
-        const ch = Number(c.channelNo);
-        // Only suffix the channel when it's a real sub-channel (NVR); a
-        // standalone camera reports channelNo 1 and keeps its bare serial.
-        const id = ch && ch !== 1 ? `${c.deviceSerial}_${ch}` : c.deviceSerial;
-        return {
-          id,
-          name: c.channelName || c.deviceName || c.deviceSerial,
-          online: Number(c.status) === 1,
-          recording: Number(c.status) === 1,
-          encrypted: Number(c.isEncrypt) === 1,
-          motion: "—",
-        };
-      });
+      await cachePicUrls(cams);
+      return cams.map((c) => ({
+        id: camId(c.deviceSerial, c.channelNo),
+        name: c.channelName || c.deviceName || c.deviceSerial,
+        online: Number(c.status) === 1,
+        recording: Number(c.status) === 1,
+        encrypted: Number(c.isEncrypt) === 1,
+        motion: "—",
+      }));
     }
     // Fallback: device-level list.
     const devices = await listAll("/api/lapp/device/list", accessToken, areaDomain);
@@ -149,6 +167,16 @@ hikRouter.get(
   })
 );
 
+// Stream an EZVIZ-hosted image URL back to the browser as JPEG.
+async function streamImage(url, res) {
+  const img = await fetch(url);
+  if (!img.ok) throw new Error(`image fetch failed: ${img.status}`);
+  const buf = Buffer.from(await img.arrayBuffer());
+  res.setHeader("Content-Type", img.headers.get("content-type") || "image/jpeg");
+  res.setHeader("Cache-Control", "no-store");
+  res.send(buf);
+}
+
 // Snapshot: fetch the temporary picUrl server-side and stream the JPEG back, so it
 // works behind auth (an <img> can't send the bearer token) and avoids CORS.
 hikRouter.get(
@@ -156,18 +184,20 @@ hikRouter.get(
   guard("hik", async (req, res) => {
     const { accessToken, areaDomain } = await getToken();
     const { deviceSerial, channelNo } = parseCamId(req.params.id);
-    const data = await ezvizPost(
-      "/api/lapp/device/capture",
-      { accessToken, deviceSerial, channelNo, code: codeFor(deviceSerial) },
-      areaDomain
-    );
-    if (!data?.picUrl) throw new Error("no picUrl returned (camera may be offline)");
-    const img = await fetch(data.picUrl);
-    if (!img.ok) throw new Error(`snapshot fetch failed: ${img.status}`);
-    const buf = Buffer.from(await img.arrayBuffer());
-    res.setHeader("Content-Type", img.headers.get("content-type") || "image/jpeg");
-    res.setHeader("Cache-Control", "no-store");
-    res.send(buf);
+    // Try a fresh live capture first; if it fails (offline, or an encrypted NVR
+    // channel without a code), fall back to EZVIZ's cached thumbnail so the tile
+    // still shows the most recent frame instead of "unavailable".
+    try {
+      const data = await ezvizPost(
+        "/api/lapp/device/capture",
+        { accessToken, deviceSerial, channelNo, code: codeFor(deviceSerial) },
+        areaDomain
+      );
+      if (data?.picUrl) return await streamImage(data.picUrl, res);
+    } catch { /* fall back to cached thumbnail */ }
+    const pic = await picUrlFor(req.params.id);
+    if (!pic) throw new Error("no snapshot available (camera may be offline or encrypted — add its code to HIK_DEVICE_CODES)");
+    await streamImage(pic, res);
   })
 );
 
