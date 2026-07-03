@@ -371,7 +371,64 @@ function SettingsPage({ user, authEnabled }) {
           attribution isn't possible there. Dashboard actions are still logged against your dashboard sign-in.
         </div>
       </Panel>
+      <Diagnostics />
     </div>
+  );
+}
+
+// Admin diagnostics: runs each provider's connection probe through the signed-in
+// session (so it carries your auth — pasting the /api/*/debug URL in the browser
+// address bar doesn't). Shows the raw JSON to copy back for endpoint mapping.
+const PROBES = [
+  { key: "geovision", label: "GV-Access Doors", path: "/api/geovision/debug" },
+  { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
+  { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
+  { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
+  { key: "amilia", label: "Amilia", path: "/api/amilia/debug/raw" },
+];
+function Diagnostics() {
+  const [busy, setBusy] = useState(null);
+  const [out, setOut] = useState({});
+  const run = async (p) => {
+    setBusy(p.key);
+    try {
+      const r = await apiFetch(p.path).then((res) => res.json());
+      setOut((o) => ({ ...o, [p.key]: JSON.stringify(r, null, 2) }));
+    } catch (e) {
+      setOut((o) => ({ ...o, [p.key]: `Error: ${e.message}` }));
+    } finally { setBusy(null); }
+  };
+  const copy = (text) => { try { navigator.clipboard?.writeText(text); } catch { /* ignore */ } };
+  return (
+    <Panel title="Connection Diagnostics" accent={C.amber}
+      right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>admin</span>}>
+      <div style={{ fontSize: 13, color: C.mid, paddingBottom: 10, lineHeight: 1.5 }}>
+        Test each integration's connection from your signed-in session. Run one, then use
+        <strong style={{ color: C.text }}> Copy</strong> and paste the result back to finish wiring it up.
+      </div>
+      {PROBES.map((p) => (
+        <div key={p.key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between" style={{ gap: 10 }}>
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{p.label}</span>
+            <div className="flex items-center gap-2">
+              {out[p.key] && (
+                <button onClick={() => copy(out[p.key])} className="so-btn" style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12, color: C.mid }}>Copy</button>
+              )}
+              <button onClick={() => run(p)} disabled={busy === p.key} className="so-btn flex items-center gap-1.5"
+                style={{ padding: "5px 14px", borderRadius: 7, fontSize: 12.5, fontWeight: 600, color: C.cyan, borderColor: C.cyan }}>
+                {busy === p.key ? <Loader2 size={13} className="spin" /> : "Run test"}
+              </button>
+            </div>
+          </div>
+          {out[p.key] && (
+            <pre style={{ marginTop: 9, padding: "10px 12px", background: C.panel2, border: `1px solid ${C.border}`,
+              borderRadius: 7, fontSize: 11, fontFamily: mono, color: C.text, maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {out[p.key]}
+            </pre>
+          )}
+        </div>
+      ))}
+    </Panel>
   );
 }
 
