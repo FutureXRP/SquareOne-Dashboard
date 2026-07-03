@@ -46,20 +46,19 @@ const LivePlayer = lazy(() => import("./LivePlayer.jsx").then((m) => ({ default:
   production call it should make. Flip CONNECTED.* to true as each goes live.
 */
 
-// Palette reskinned to the SquareOne Compassion brand (squareonecompassion.com):
-// a navy-tinted dark base with brand blue as the primary accent and brand orange
-// as the secondary accent. Keys are unchanged so existing usages keep working —
-// only the values shifted. `cyan` now carries SquareOne blue; `amber` carries the
-// brand's orange divider color; `navy` is the deep brand navy for headers.
+// "Workspace" palette — a light admin surface with a navy sidebar and SquareOne
+// brand accents (squareonecompassion.com). Keys are unchanged so every component
+// adapts automatically; only the values shifted from the old dark scheme.
+// `cyan` carries SquareOne blue, `amber` the brand orange, `navy` the sidebar.
 const C = {
-  bg: "#0A0F1A", panel: "#111A28", panel2: "#16212F", panelHi: "#1D2A3A",
-  border: "#243449", borderHi: "#35496180",
-  text: "#EAF0F6", mid: "#93A6BC", dim: "#5D6E82",
-  go: "#3DBC8A", goBg: "#11251F",
-  cyan: "#3B9BE8", cyanBg: "#0E2334",       // SquareOne brand blue
-  amber: "#E8833A", amberBg: "#251708",     // SquareOne brand orange
-  red: "#E0564B", redBg: "#26110F",
-  navy: "#16345F",                          // deep brand navy
+  bg: "#F4F7FB", panel: "#FFFFFF", panel2: "#F1F5FA", panelHi: "#E8EEF6",
+  border: "#E3E9F1", borderHi: "#CBD6E3",
+  text: "#1B2432", mid: "#5B6675", dim: "#8492A2",
+  go: "#2F9E6F", goBg: "#E8F5EE",
+  cyan: "#2E7BC4", cyanBg: "#E9F1FB",       // SquareOne brand blue
+  amber: "#E8833A", amberBg: "#FBEEE1",     // SquareOne brand orange
+  red: "#D84B40", redBg: "#FBEAE8",
+  navy: "#16345F",                          // sidebar / deep brand navy
 };
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
@@ -217,74 +216,109 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
     return { state: "ATTENTION", color: C.amber, note: `${openDoors.length} door open with alarm set — verify` };
   }, [doors, zones, alarm, lockdown]);
 
+  const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
+  const pageTitle = (TABS.find(([id]) => id === tab) || [, "Home"])[1];
+
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: sans, minHeight: "100%" }}>
       <style>{`
         .so-btn{transition:all .12s ease;cursor:pointer;border:1px solid ${C.border};background:${C.panel2};color:${C.text}}
         .so-btn:hover{border-color:${C.borderHi};background:${C.panelHi}}
         .so-btn:focus-visible{outline:2px solid ${C.cyan};outline-offset:2px}
-        .so-tab:focus-visible{outline:2px solid ${C.cyan};outline-offset:-2px}
         .pulse{animation:so-pulse 2.4s ease-in-out infinite}
         @keyframes so-pulse{0%,100%{opacity:1}50%{opacity:.45}}
         .spin{animation:so-spin 1s linear infinite}
         @keyframes so-spin{to{transform:rotate(360deg)}}
         @media (prefers-reduced-motion: reduce){.pulse{animation:none}}
         ::placeholder{color:${C.dim}}
+        /* Workspace shell */
+        .so-shell{display:flex;min-height:100vh}
+        .so-side{width:214px;flex:0 0 auto;display:flex;flex-direction:column;gap:5px;
+          position:sticky;top:0;height:100vh;padding:15px 12px;background:${C.navy};color:#DCE6F2}
+        .so-brand{display:flex;align-items:center;gap:10px;padding:6px 8px 15px}
+        .so-nav{display:flex;flex-direction:column;gap:3px;overflow-y:auto}
+        .so-navitem{display:flex;align-items:center;gap:11px;width:100%;text-align:left;border:none;
+          cursor:pointer;padding:9px 11px;border-radius:9px;font-size:13.5px;font-family:inherit;color:#B7C7DC;background:transparent}
+        .so-navitem:hover{background:rgba(255,255,255,.09)}
+        .so-navitem:focus-visible{outline:2px solid #7FB2E6;outline-offset:-2px}
+        .so-foot{margin-top:auto;display:flex;align-items:center;gap:8px;padding:11px 8px 3px;border-top:1px solid rgba(255,255,255,.12)}
+        .so-signout{margin-left:auto;background:rgba(255,255,255,.09);border:none;color:#CFE0F2;cursor:pointer;padding:7px 9px;border-radius:7px;display:flex}
+        .so-signout:hover{background:rgba(255,255,255,.18)}
+        .so-main{flex:1;min-width:0;display:flex;flex-direction:column}
+        .so-topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
+          padding:13px 24px;background:${C.panel};border-bottom:1px solid ${C.border};box-shadow:0 1px 0 0 ${C.amber}}
+        .so-content{padding:20px 24px 64px;display:flex;flex-direction:column;gap:14px}
+        @media (max-width:820px){
+          .so-shell{flex-direction:column}
+          .so-side{width:auto;height:auto;position:static;flex-direction:column;gap:8px}
+          .so-nav{flex-direction:row;flex-wrap:nowrap;overflow-x:auto;gap:2px}
+          .so-navitem{flex:0 0 auto;padding:8px 10px}
+          .so-navlabel{display:none}
+          .so-foot{display:none}
+          .so-brand{padding-bottom:2px}
+        }
       `}</style>
 
-      <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 16px 64px" }}>
-        {/* Masthead — brand orange stripe under the header echoes the divider on squareonecompassion.com */}
-        <header className="flex items-center justify-between" style={{ padding: "20px 0 14px", borderBottom: `1px solid ${C.border}`, boxShadow: `0 1px 0 0 ${C.amber}` }}>
-          <div className="flex items-center gap-3">
-            <BrandLogo size={34} fallbackColor={C.cyan} />
-            <div>
-              <div style={{ fontSize: 11, letterSpacing: 3, color: C.cyan, fontFamily: mono, textTransform: "uppercase", fontWeight: 600 }}>SquareOne Compassion</div>
-              <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>Operations Center</div>
+      <div className="so-shell">
+        {/* Sidebar */}
+        <aside className="so-side">
+          <div className="so-brand">
+            <BrandLogo size={30} fallbackColor="#3B9BE8" />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: "#fff", lineHeight: 1.1 }}>SquareOne</div>
+              <div style={{ fontSize: 9, letterSpacing: 2, color: "#9FB4CF", fontFamily: mono, textTransform: "uppercase" }}>Operations</div>
             </div>
           </div>
-          <div className="flex items-center gap-4">
-            <NotificationBell notifications={notifications} />
-            {authEnabled && user && <AccountChip user={user} role={role} onSignOut={onSignOut} />}
-            <ClockReadout />
+          <nav className="so-nav">
+            {TABS.map(([id, label, Icon]) => {
+              const active = tab === id;
+              const alert = id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup);
+              return (
+                <button key={id} onClick={() => setTab(id)} className="so-navitem"
+                  style={active ? { background: "rgba(255,255,255,.15)", color: "#fff", fontWeight: 600 } : undefined}>
+                  <Icon size={16} /><span className="so-navlabel">{label}</span>
+                  {alert && <span style={{ marginLeft: "auto", width: 7, height: 7, borderRadius: 99, background: C.amber }} />}
+                </button>
+              );
+            })}
+          </nav>
+          {authEnabled && user && (
+            <div className="so-foot">
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12, color: "#EAF0F8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>{user.email}</div>
+                {role && <div style={{ fontSize: 9, color: "#8FA5C2", fontFamily: mono, textTransform: "uppercase", letterSpacing: 1 }}>{role}</div>}
+              </div>
+              <button onClick={onSignOut} className="so-signout" title="Sign out"><LogOut size={15} /></button>
+            </div>
+          )}
+        </aside>
+
+        {/* Main */}
+        <main className="so-main">
+          <header className="so-topbar">
+            <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: -0.2 }}>{pageTitle}</h1>
+            <div className="flex items-center gap-3">
+              <NotificationBell notifications={notifications} />
+              <ClockReadout />
+            </div>
+          </header>
+          <div className="so-content">
+            <ConnectionBar connected={{ hub: hubConnected, ...connected }} onReload={() => { reload(); reloadHub(); }} />
+            {tab === "home" && <><Verdict v={verdict} /><Home doors={doors} zones={zones} alarm={alarm} log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} elc={elc} /></>}
+            {tab === "security" && <Security doors={doors} alarm={alarm} hub={hub} lockdown={lockdown} />}
+            {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
+            {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
+            {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
+            {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik}
+              layout={prefs.cameras || {}} onLayout={(cameras) => setPrefs({ cameras })} />}
+            {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
+            {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
+            {tab === "automation" && <Automation />}
+            {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
+            {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
+            {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} />}
           </div>
-        </header>
-
-        <ConnectionBar connected={{ hub: hubConnected, ...connected }} onReload={() => { reload(); reloadHub(); }} />
-
-        {/* Verdict hero */}
-        <Verdict v={verdict} />
-
-        {/* Tabs */}
-        <nav className="flex gap-1" style={{ margin: "16px 0", borderBottom: `1px solid ${C.border}`, overflowX: "auto" }}>
-          {TABS.map(([id, label, Icon]) => {
-            const active = tab === id;
-            const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
-            const alert = id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup);
-            return (
-              <button key={id} onClick={() => setTab(id)} className="so-tab flex items-center gap-2 whitespace-nowrap"
-                style={{ background: "transparent", border: "none", padding: "10px 14px", cursor: "pointer",
-                  color: active ? C.text : C.mid, fontSize: 13.5, fontWeight: active ? 600 : 500,
-                  borderBottom: active ? `2px solid ${C.cyan}` : "2px solid transparent", marginBottom: -1 }}>
-                <Icon size={15} />{label}
-                {alert && <span style={{ width: 6, height: 6, borderRadius: 99, background: C.amber }} />}
-              </button>
-            );
-          })}
-        </nav>
-
-        {tab === "home" && <Home doors={doors} zones={zones} alarm={alarm} log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} elc={elc} />}
-        {tab === "security" && <Security doors={doors} alarm={alarm} hub={hub} lockdown={lockdown} />}
-        {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
-        {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
-        {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
-        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik}
-          layout={prefs.cameras || {}} onLayout={(cameras) => setPrefs({ cameras })} />}
-        {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
-        {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
-        {tab === "automation" && <Automation />}
-        {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
-        {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
-        {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} />}
+        </main>
       </div>
       {celebrate && <Celebration signup={celebrate} onClose={() => setCelebrate(null)} />}
     </div>
@@ -1435,9 +1469,11 @@ function Snapshot({ path, name, online }) {
   }, [path]);
 
   if (src) return <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
+  // The tile behind this is a dark video surface, so use light-on-dark colors
+  // regardless of the (light) app theme.
   return (
-    <div className="flex flex-col items-center gap-1" style={{ color: C.dim, fontFamily: mono, fontSize: 12 }}>
-      <Video size={22} color={online ? C.dim : C.red} />
+    <div className="flex flex-col items-center gap-1" style={{ color: "#7C8A9C", fontFamily: mono, fontSize: 12 }}>
+      <Video size={22} color={online ? "#7C8A9C" : C.red} />
       {!online ? "camera offline" : failed ? "snapshot unavailable" : path ? "loading…" : "feed via Hik-Connect"}
     </div>
   );
