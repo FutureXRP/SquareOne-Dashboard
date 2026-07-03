@@ -9,6 +9,7 @@ import { hubRouter } from "./providers/homeassistant.js";
 import { assistantRouter } from "./providers/assistant.js";
 import { doorsRouter } from "./providers/doorSchedule.js";
 import { alertsRouter } from "./providers/memberAlerts.js";
+import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingClouds.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -30,6 +31,9 @@ app.get("/api/health", (_req, res) => {
       procare: config.procare.configured,
       assistant: config.anthropic.configured,
       alerts: config.alerts.configured,
+      pro1: config.pro1.configured,
+      napco: config.napco.configured,
+      geovision: config.geovision.configured,
     },
   });
 });
@@ -44,5 +48,9 @@ app.use("/api/assistant", requireAuth, assistantRouter);
 // user, /run wants the cron secret (a scheduler can't sign in).
 app.use("/api/doors", doorsRouter);
 app.use("/api/alerts", alertsRouter);
+// Building-system clouds — start as admin-only login probes (see buildingClouds.js).
+app.use("/api/pro1", requireAuth, pro1Router);
+app.use("/api/napco", requireAuth, napcoRouter);
+app.use("/api/geovision", requireAuth, geovisionRouter);
 
 export default app;
