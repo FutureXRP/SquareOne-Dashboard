@@ -18,6 +18,21 @@ export function Login() {
   const [msg, setMsg] = useState(null); // { kind: 'err'|'ok', text }
   const [magic, setMagic] = useState(false);
 
+  const signInMicrosoft = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "azure",
+        options: { scopes: "email openid profile", redirectTo: window.location.origin },
+      });
+      if (error) throw error;
+      // Redirects to Microsoft; the session returns via onAuthStateChange.
+    } catch (err) {
+      setMsg({ kind: "err", text: err.message || "Microsoft sign-in unavailable — is it enabled in Supabase?" });
+      setBusy(false);
+    }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true); setMsg(null);
@@ -63,6 +78,16 @@ export function Login() {
             {busy ? <Loader2 size={15} className="spin" /> : magic ? "Send magic link" : "Sign in"}
           </button>
 
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px", color: C.dim, fontSize: 11.5, fontFamily: mono }}>
+            <div style={{ flex: 1, height: 1, background: C.border }} /> OR <div style={{ flex: 1, height: 1, background: C.border }} />
+          </div>
+
+          <button type="button" onClick={signInMicrosoft} disabled={busy}
+            style={{ width: "100%", padding: "11px", borderRadius: 8, border: `1px solid ${C.borderHi}`, cursor: "pointer",
+              background: C.panel2, color: C.text, fontWeight: 600, fontSize: 13.5, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
+            <MicrosoftLogo /> Sign in with Microsoft
+          </button>
+
           <button type="button" onClick={() => { setMagic((m) => !m); setMsg(null); }}
             style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: C.mid, fontSize: 12.5, cursor: "pointer", fontFamily: mono }}>
             {magic ? "← use password instead" : "email me a magic link instead"}
@@ -81,6 +106,17 @@ export function Login() {
       </div>
       <style>{`@keyframes so-spin{to{transform:rotate(360deg)}} .spin{animation:so-spin 1s linear infinite}`}</style>
     </div>
+  );
+}
+
+function MicrosoftLogo() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 21 21" aria-hidden="true">
+      <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+      <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+      <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+      <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+    </svg>
   );
 }
 

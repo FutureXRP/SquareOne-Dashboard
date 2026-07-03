@@ -91,6 +91,23 @@ create table if not exists token_cache (
 );
 
 -- ---------------------------------------------------------------------------
+-- Per-user vendor credentials (each person's own Hik ID, Gemini alarm login,
+-- GV-Access login) so device actions are attributed to the real operator in
+-- the vendor's own logs — not a shared account. The secret is AES-GCM
+-- encrypted by the server (CREDENTIAL_KEY); this table is SERVICE-ROLE ONLY,
+-- so even the ciphertext is never exposed to the browser. Managed through
+-- /api/me/credentials. Pro1 is excluded — it allows only one login (shared).
+-- ---------------------------------------------------------------------------
+create table if not exists user_credentials (
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  provider      text not null,                 -- 'napco' | 'hik' | 'geovision'
+  username      text,                          -- vendor user id (not secret)
+  secret_cipher text,                          -- AES-GCM ciphertext of the password
+  updated_at    timestamptz not null default now(),
+  primary key (user_id, provider)
+);
+
+-- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location
 -- ---------------------------------------------------------------------------
 create or replace function role_at(loc uuid)
@@ -128,6 +145,7 @@ alter table integration_config  enable row level security;
 alter table audit_log           enable row level security;
 alter table okdhs_imports       enable row level security;
 alter table token_cache         enable row level security;  -- no policies = service-role only
+alter table user_credentials    enable row level security;  -- no policies = service-role only
 
 -- Profiles: a user sees/edits their own; admins see all.
 create policy profiles_self on profiles

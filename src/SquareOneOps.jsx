@@ -4,7 +4,7 @@ import {
   Clock, Bell, Terminal, ChevronUp, ChevronDown, Send, Power,
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
-  DoorOpen, Building2, TrendingUp, LogOut, DollarSign,
+  DoorOpen, Building2, TrendingUp, LogOut, DollarSign, Settings, KeyRound, Loader2, Check, Trash2,
 } from "lucide-react";
 
 // Compact currency, e.g. 1575 -> "$1,575". Non-numbers pass through as "$0".
@@ -75,6 +75,7 @@ const TABS = [
   ["automation", "Automation", Clock],
   ["alerts", "Alerts", Bell],
   ["assistant", "Assistant", Terminal],
+  ["settings", "Settings", Settings],
 ];
 
 /* ------------------------- preview mock data (cloud) ------------------------- */
@@ -222,6 +223,8 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         .so-tab:focus-visible{outline:2px solid ${C.cyan};outline-offset:-2px}
         .pulse{animation:so-pulse 2.4s ease-in-out infinite}
         @keyframes so-pulse{0%,100%{opacity:1}50%{opacity:.45}}
+        .spin{animation:so-spin 1s linear infinite}
+        @keyframes so-spin{to{transform:rotate(360deg)}}
         @media (prefers-reduced-motion: reduce){.pulse{animation:none}}
         ::placeholder{color:${C.dim}}
       `}</style>
@@ -277,11 +280,128 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {tab === "automation" && <Automation />}
         {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
         {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
+        {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} />}
       </div>
       {celebrate && <Celebration signup={celebrate} onClose={() => setCelebrate(null)} />}
     </div>
   );
 }
+
+/* ------------------------------ SETTINGS (per-user credentials) ------------------------------ */
+// Each operator stores their OWN vendor logins so alarm/door/camera actions are
+// attributed to them in the vendor's logs — not a shared account. Secrets are
+// encrypted server-side and never sent back to the browser. Pro1 is shared
+// (single login) and intentionally not here.
+const CRED_PROVIDERS = [
+  { key: "napco", label: "Gemini Alarm", hint: "Your Napco Gemini app username & password", user: "Username", hasSecret: true },
+  { key: "geovision", label: "GV-Access Doors", hint: "Your GV-Access username & password", user: "Username", hasSecret: true },
+  { key: "hik", label: "Hik Cameras", hint: "Your Hik-Connect user ID (for attribution in the camera log)", user: "Hik user ID", hasSecret: false },
+];
+
+function SettingsPage({ user, authEnabled }) {
+  const [state, setState] = useState(null); // { cryptoReady, providers }
+  const load = useCallback(() => {
+    apiFetch("/api/me/credentials").then((r) => r.json())
+      .then((j) => { if (j.ok) setState(j.data); }).catch(() => setState({ error: true }));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  if (authEnabled && !user) return <Empty text="Sign in to manage your credentials." />;
+  return (
+    <div className="grid gap-3">
+      <Panel title="My Credentials" accent={C.cyan}
+        right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>{user?.email}</span>}>
+        <div style={{ fontSize: 13, color: C.mid, paddingBottom: 10, lineHeight: 1.5 }}>
+          Enter your own logins for each system. When you arm the alarm or unlock a door from this
+          dashboard, the action runs as <strong style={{ color: C.text }}>you</strong> — so the vendor's log shows who did it,
+          not a shared account. Passwords are encrypted and never shown again.
+        </div>
+        {!authEnabled && (
+          <div style={{ ...noteStyle(C.amber) }}>Sign-in isn't enabled yet, so credentials can't be saved per user. Ask your admin to turn on Supabase auth.</div>
+        )}
+        {state && !state.cryptoReady && (
+          <div style={{ ...noteStyle(C.amber) }}>Server encryption key (CREDENTIAL_KEY) isn't set — passwords can't be stored until an admin adds it in Vercel.</div>
+        )}
+        {state?.providers && CRED_PROVIDERS.map((p) => (
+          <CredRow key={p.key} def={p} current={state.providers[p.key]} disabled={!authEnabled} onSaved={load} />
+        ))}
+        {!state && <div style={{ padding: "10px 0", color: C.dim, fontFamily: mono, fontSize: 12.5 }}>Loading…</div>}
+      </Panel>
+      <Panel title="Pro1 Thermostats" accent={C.dim}>
+        <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.5 }}>
+          Pro1 allows only one login, so it uses a single shared account for everyone — individual
+          attribution isn't possible there. Dashboard actions are still logged against your dashboard sign-in.
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+function noteStyle(color) {
+  return { margin: "6px 0 12px", padding: "9px 12px", borderRadius: 7, fontSize: 12.5,
+    background: C.panel2, border: `1px solid ${color}`, color };
+}
+
+function CredRow({ def, current, disabled, onSaved }) {
+  const [username, setUsername] = useState(current?.username || "");
+  const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const save = async () => {
+    setBusy(true); setErr(null); setSaved(false);
+    try {
+      const r = await apiFetch(`/api/me/credentials/${def.key}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, secret }),
+      }).then((res) => res.json());
+      if (!r.ok) throw new Error(r.message || "Save failed");
+      setSecret(""); setSaved(true); onSaved?.();
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const remove = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await apiFetch(`/api/me/credentials/${def.key}`, { method: "DELETE" });
+      setUsername(""); setSecret(""); onSaved?.();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ padding: "12px 0", borderBottom: `1px solid ${C.border}` }}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+        <div className="flex items-center gap-2">
+          <KeyRound size={15} color={C.cyan} />
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{def.label}</span>
+          {current?.username && <span style={{ fontSize: 11, fontFamily: mono, color: C.go }}>· set</span>}
+        </div>
+        {current?.username && (
+          <button onClick={remove} disabled={busy} title="Remove"
+            style={{ background: "none", border: "none", cursor: "pointer", color: C.dim, display: "flex" }}>
+            <Trash2 size={14} />
+          </button>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 8 }}>{def.hint}</div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: def.hasSecret ? "1fr 1fr auto" : "1fr auto" }}>
+        <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder={def.user} disabled={disabled || busy}
+          style={inputStyle} />
+        {def.hasSecret && (
+          <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)}
+            placeholder={current?.hasSecret ? "Password (leave blank to keep)" : "Password"} disabled={disabled || busy} style={inputStyle} />
+        )}
+        <button onClick={save} disabled={disabled || busy || (!username && !secret)}
+          style={{ padding: "0 16px", borderRadius: 7, border: "none", cursor: "pointer", background: C.cyan, color: C.bg, fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+          {busy ? <Loader2 size={14} className="spin" /> : saved ? <Check size={14} /> : "Save"}
+        </button>
+      </div>
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: C.red, fontFamily: mono }}>{err}</div>}
+    </div>
+  );
+}
+const inputStyle = { padding: "9px 11px", background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, fontSize: 13.5, outline: "none", fontFamily: sans, minWidth: 0 };
 
 /* ------------------------- notifications & celebration ------------------------- */
 
