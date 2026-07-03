@@ -396,6 +396,7 @@ function SettingsPage({ user, authEnabled, role, tabPrefs = {}, onTabPrefs }) {
 // address bar doesn't). Shows the raw JSON to copy back for endpoint mapping.
 const PROBES = [
   { key: "geovision", label: "GV-Access Doors", path: "/api/geovision/debug" },
+  { key: "geovision-login", label: "GV-Access Login Test (deep)", path: "/api/geovision/login-probe" },
   { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },

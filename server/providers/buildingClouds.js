@@ -123,3 +123,70 @@ export const napcoRouter = makeProbeRouter("napco", [
 // GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
 // hosts to guess: the app talks to one server address, which the owner supplies.
 export const geovisionRouter = makeProbeRouter("geovision");
+
+// GeoVision-specific deep login test. /asweb/api/login answered 302 (a session
+// login), so try it with the credential field names ASManager/ASWeb use, across
+// GET+POST and json/form, and report the FULL response shape (all headers,
+// redirect target, cookies, body) so the exact handshake can be mapped.
+geovisionRouter.get(
+  "/login-probe",
+  requireAdmin,
+  guard("geovision", async () => {
+    const c = config.geovision;
+    const { username, secret } = await credsFor({ user: { id: "admin" } }, "geovision")
+      .catch(() => ({ username: c.username, secret: c.password }));
+    const u = username || c.username;
+    const p = secret || c.password;
+
+    const bodies = [
+      ["json", { username: u, password: p }],
+      ["json", { account: u, password: p }],
+      ["json", { UserID: u, Password: p }],
+      ["json", { loginId: u, loginPwd: p }],
+      ["form", { username: u, password: p }],
+      ["form", { account: u, password: p }],
+      ["form", { UserID: u, Password: p }],
+    ];
+    const paths = ["/asweb/api/login", "/asweb/api/account/login", "/asweb/login", "/asweb/api/session"];
+
+    const attempts = [];
+    for (const path of paths) {
+      for (const [style, body] of bodies) {
+        for (const method of ["POST", "GET"]) {
+          const started = Date.now();
+          try {
+            const url = method === "GET"
+              ? `${c.baseUrl}${path}?${new URLSearchParams(body).toString()}`
+              : `${c.baseUrl}${path}`;
+            const res = await fetch(url, {
+              method,
+              headers: method === "GET" ? { Accept: "*/*" }
+                : { "Content-Type": style === "form" ? "application/x-www-form-urlencoded" : "application/json", Accept: "*/*" },
+              body: method === "GET" ? undefined : (style === "form" ? new URLSearchParams(body).toString() : JSON.stringify(body)),
+              redirect: "manual",
+              signal: AbortSignal.timeout(9000),
+            });
+            const text = await res.text();
+            const headers = {};
+            res.headers.forEach((v, k) => { headers[k] = k.toLowerCase() === "set-cookie" ? v.split("=")[0] + "=…" : v; });
+            attempts.push({
+              path, method, style, fields: Object.keys(body).join("+"),
+              status: res.status, ms: Date.now() - started, headers,
+              location: res.headers.get("location") || undefined,
+              cookie: res.headers.get("set-cookie") ? res.headers.get("set-cookie").split("=")[0] : undefined,
+              body: text.slice(0, 300).replace(/[A-Za-z0-9_-]{28,}/g, "…token…"),
+            });
+          } catch (e) {
+            attempts.push({ path, method, style, error: e.message, ms: Date.now() - started });
+          }
+        }
+      }
+    }
+    // Most promising first: a cookie or 2xx/3xx beats a 404/error.
+    attempts.sort((a, b) =>
+      (a.cookie ? 0 : 1) - (b.cookie ? 0 : 1) ||
+      ((a.status >= 200 && a.status < 400) ? 0 : 1) - ((b.status >= 200 && b.status < 400) ? 0 : 1) ||
+      (a.status ?? 999) - (b.status ?? 999));
+    return { base: c.baseUrl, account: u, attempts: attempts.slice(0, 16) };
+  })
+);
