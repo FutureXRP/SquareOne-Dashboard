@@ -138,16 +138,17 @@ geovisionRouter.get(
     const u = username || c.username;
     const p = secret || c.password;
 
+    // GeoVision .srf logins use short field names; cover the common ones.
     const bodies = [
-      ["json", { username: u, password: p }],
-      ["json", { account: u, password: p }],
-      ["json", { UserID: u, Password: p }],
-      ["json", { loginId: u, loginPwd: p }],
       ["form", { username: u, password: p }],
-      ["form", { account: u, password: p }],
-      ["form", { UserID: u, Password: p }],
+      ["form", { username: u, passwd: p }],
+      ["form", { id: u, pwd: p }],
+      ["form", { account: u, pwd: p }],
+      ["form", { UserId: u, Passwd: p }],
+      ["json", { username: u, password: p }],
     ];
-    const paths = ["/asweb/api/login", "/asweb/api/account/login", "/asweb/login", "/asweb/api/session"];
+    // Login.srf is the real handler the page pointed us to.
+    const paths = ["/asweb/Login/Login.srf", "/asweb/Login/LoginPC.srf", "/asweb/api/login"];
 
     const attempts = [];
     for (const path of paths) {
@@ -202,7 +203,10 @@ geovisionRouter.get(
           .map((t) => (t.match(/(name|id|type)\s*=\s*"[^"]*"/gi) || []).join(" "))
           .filter(Boolean).slice(0, 25);
         const scripts = (html.match(/(login|auth|api)[A-Za-z0-9_/.]*/gi) || []).slice(0, 20);
-        return { path, status: res.status, cookie: res.headers.get("set-cookie") ? res.headers.get("set-cookie").split("=")[0] : undefined, forms, inputs, apiHints: [...new Set(scripts)] };
+        // Raw excerpt (token-redacted) so we can read the JS that builds the
+        // login request when there's no server-rendered <form>.
+        const raw = html.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…").slice(0, 1600);
+        return { path, status: res.status, cookie: res.headers.get("set-cookie") ? res.headers.get("set-cookie").split("=")[0] : undefined, forms, inputs, apiHints: [...new Set(scripts)], raw };
       } catch (e) { return { path, error: e.message }; }
     };
     const pages = [await pageOf("/asweb/Login/"), await pageOf("/asweb/")];
