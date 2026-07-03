@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { config, guard } from "../config.js";
 import { requireAdmin } from "../auth.js";
+import { credsFor } from "./userCreds.js";
 
 /*
   Building-system cloud providers: Pro1 thermostats, Napco alarm (iBridge/Prima),
@@ -76,12 +77,17 @@ function makeProbeRouter(providerKey, extraBases = []) {
   router.get(
     "/debug",
     requireAdmin,
-    guard(providerKey, async () => {
+    guard(providerKey, async (req) => {
       const c = config[providerKey];
+      // Prefer the signed-in operator's own login (so the probe/action is
+      // attributed to them); fall back to the shared env credential.
+      const { username, secret, source } = await credsFor(req, providerKey).catch(() => ({
+        username: c.email, secret: c.password, source: "shared",
+      }));
       const bases = [c.baseUrl, ...extraBases].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
       const probes = [];
-      for (const base of bases) probes.push(await probeLogin(base, c.email, c.password));
-      return { provider: providerKey, probes };
+      for (const base of bases) probes.push(await probeLogin(base, username || c.email, secret || c.password));
+      return { provider: providerKey, credentialSource: source, probes };
     })
   );
   return router;

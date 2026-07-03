@@ -10,6 +10,7 @@ import { assistantRouter } from "./providers/assistant.js";
 import { doorsRouter } from "./providers/doorSchedule.js";
 import { alertsRouter } from "./providers/memberAlerts.js";
 import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingClouds.js";
+import { meRouter } from "./providers/userCreds.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -52,5 +53,8 @@ app.use("/api/alerts", alertsRouter);
 app.use("/api/pro1", requireAuth, pro1Router);
 app.use("/api/napco", requireAuth, napcoRouter);
 app.use("/api/geovision", requireAuth, geovisionRouter);
+// Per-user vendor credentials (Settings page): each operator's own login so
+// device actions attribute to them in the vendor's logs.
+app.use("/api/me", requireAuth, meRouter);
 
 export default app;
