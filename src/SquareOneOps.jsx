@@ -166,6 +166,34 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
     return () => { stop = true; clearInterval(id); };
   }, [pushLog]);
 
+  // The bell's notification list. Member sign-ups for now — future alert kinds
+  // (camera offline, HVAC drift, low ELC ratio...) just append here.
+  const notifications = useMemo(
+    () =>
+      memberSignups.map((s) => ({
+        at: s.at,
+        kind: "member",
+        icon: UserCheck,
+        color: C.go,
+        text: `${s.count === 1 ? "New member" : `${s.count} new members`}: ${s.members.join(", ")}${s.more ? ` +${s.more} more` : ""}`,
+      })),
+    [memberSignups]
+  );
+
+  // Celebration popup on the Members tab: fires once per sign-up event (marker
+  // kept in localStorage), only for events fresh within the last 24 hours.
+  const [celebrate, setCelebrate] = useState(null);
+  useEffect(() => {
+    const newest = memberSignups[0];
+    if (!newest || tab !== "members") return;
+    const celebrated = localStorage.getItem("so-celebrated") || "";
+    const fresh = Date.now() - new Date(newest.at).getTime() < 24 * 3600 * 1000;
+    if (fresh && newest.at > celebrated) {
+      localStorage.setItem("so-celebrated", newest.at);
+      setCelebrate(newest);
+    }
+  }, [memberSignups, tab]);
+
   const [opening, setOpening] = useState(
     ["Unlock doors", "Disarm alarm", "HVAC to day mode", "Coffee started", "TVs on", "Golf sim ready", "Music playing"].map((l, i) => ({ id: i, label: l, done: false }))
   );
@@ -209,6 +237,7 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <NotificationBell notifications={notifications} />
             {authEnabled && user && <AccountChip user={user} role={role} onSignOut={onSignOut} />}
             <ClockReadout />
           </div>
@@ -249,6 +278,104 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
         {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
       </div>
+      {celebrate && <Celebration signup={celebrate} onClose={() => setCelebrate(null)} />}
+    </div>
+  );
+}
+
+/* ------------------------- notifications & celebration ------------------------- */
+
+// Masthead bell: unread badge + dropdown. Opening it marks everything read
+// (marker in localStorage so it survives refreshes).
+function NotificationBell({ notifications }) {
+  const [open, setOpen] = useState(false);
+  const [seenAt, setSeenAt] = useState(() => localStorage.getItem("so-notif-seen") || "");
+  const unread = notifications.filter((n) => n.at > seenAt).length;
+  const toggle = () => {
+    setOpen((o) => !o);
+    if (!open && notifications[0]) {
+      localStorage.setItem("so-notif-seen", notifications[0].at);
+      setSeenAt(notifications[0].at);
+    }
+  };
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={toggle} aria-label="Notifications"
+        style={{ background: "transparent", border: `1px solid ${open ? C.borderHi : C.border}`, borderRadius: 8,
+          padding: "7px 9px", cursor: "pointer", color: unread ? C.text : C.mid, position: "relative", display: "flex" }}>
+        <Bell size={16} />
+        {unread > 0 && (
+          <span style={{ position: "absolute", top: -5, right: -5, minWidth: 16, height: 16, borderRadius: 99,
+            background: C.amber, color: "#1A1108", fontSize: 10, fontWeight: 800, display: "flex",
+            alignItems: "center", justifyContent: "center", padding: "0 4px", fontFamily: mono }}>
+            {unread > 9 ? "9+" : unread}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
+          <div style={{ position: "absolute", right: 0, top: "calc(100% + 8px)", width: 330, maxHeight: 380, overflowY: "auto",
+            background: C.panel, border: `1px solid ${C.borderHi}`, borderRadius: 10, zIndex: 61,
+            boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}>
+            <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 12, fontFamily: mono,
+              letterSpacing: 1.5, textTransform: "uppercase", color: C.mid }}>
+              Notifications
+            </div>
+            {notifications.length === 0 ? (
+              <div style={{ padding: "18px 14px", fontSize: 13, color: C.dim }}>Nothing yet — new member sign-ups will show here.</div>
+            ) : notifications.map((n, i) => (
+              <div key={n.at + i} className="flex gap-2" style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 13 }}>
+                <n.icon size={15} color={n.color} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div style={{ minWidth: 0 }}>
+                  <div>{n.text}</div>
+                  <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, marginTop: 2 }}>
+                    {new Date(n.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Full-screen celebration when a new member signs up (Members tab).
+function Celebration({ signup, onClose }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 12000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+  const confetti = ["🎉", "🎊", "✨", "🎈", "⭐", "🎉", "✨", "🎊", "🎈", "⭐", "🎉", "✨"];
+  return (
+    <div onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(4,8,14,.65)", display: "flex", alignItems: "center",
+        justifyContent: "center", zIndex: 100, backdropFilter: "blur(2px)" }}>
+      {confetti.map((c, i) => (
+        <span key={i} style={{ position: "absolute", top: -30, left: `${(i * 8.3 + 4) % 100}%`, fontSize: 22 + (i % 3) * 6,
+          animation: `so-confetti ${2.6 + (i % 5) * 0.7}s linear ${(i % 6) * 0.45}s infinite` }}>{c}</span>
+      ))}
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: C.panel, border: `1px solid ${C.borderHi}`, borderTop: `3px solid ${C.amber}`, borderRadius: 16,
+          padding: "36px 44px 30px", textAlign: "center", maxWidth: 440, margin: 20, boxShadow: "0 24px 64px rgba(0,0,0,.5)" }}>
+        <div style={{ fontSize: 48, lineHeight: 1 }}>🎉</div>
+        <div style={{ fontSize: 22, fontWeight: 800, marginTop: 12 }}>Congratulations!</div>
+        <div style={{ fontSize: 15, color: C.mid, marginTop: 6 }}>
+          {signup.count === 1 ? "A new member has signed up!" : `${signup.count} new members have signed up!`}
+        </div>
+        <div style={{ fontSize: 15, color: C.cyan, fontWeight: 600, marginTop: 10 }}>
+          {signup.members.join(", ")}{signup.more ? ` +${signup.more} more` : ""}
+        </div>
+        <button onClick={onClose}
+          style={{ marginTop: 20, padding: "9px 26px", borderRadius: 8, border: "none", cursor: "pointer",
+            background: C.cyan, color: C.bg, fontWeight: 700, fontSize: 13.5 }}>
+          Awesome!
+        </button>
+      </div>
+      <style>{`@keyframes so-confetti { 0% { transform: translateY(-4vh) rotate(0deg); opacity: 1 }
+        100% { transform: translateY(106vh) rotate(340deg); opacity: .85 } }`}</style>
     </div>
   );
 }
