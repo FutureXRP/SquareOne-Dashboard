@@ -27,16 +27,21 @@ async function attempt(base, path, body, style) {
         Accept: "application/json",
       },
       body: style === "form" ? new URLSearchParams(body).toString() : JSON.stringify(body),
+      redirect: "manual", // capture 3xx targets instead of following them
       signal: AbortSignal.timeout(9000),
     });
     const text = await res.text();
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { /* HTML or plain text */ }
     const looksJson = parsed !== null;
+    // A 3xx with a Set-Cookie is the classic sign of a session login working.
+    const setCookie = res.headers.get("set-cookie");
     return {
       path, style, status: res.status, ms: Date.now() - started,
       kind: looksJson ? "json" : text.trim().startsWith("<") ? "html" : "text",
       keys: looksJson && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed).slice(0, 20) : undefined,
+      location: res.headers.get("location") || undefined,
+      sessionCookie: setCookie ? setCookie.split("=")[0] : undefined,
       // Truncated peek, with anything resembling a token shortened.
       peek: (looksJson ? JSON.stringify(parsed) : text).slice(0, 260).replace(/[A-Za-z0-9_-]{28,}/g, "…token…"),
     };
@@ -67,8 +72,12 @@ async function probeLogin(base, login, password) {
       results.push(await attempt(base, path, body, style));
     }
   }
-  // Surface interesting responses first: JSON beats HTML, non-404 beats 404.
-  results.sort((a, b) => (a.kind === "json" ? 0 : 1) - (b.kind === "json" ? 0 : 1) || (a.status ?? 999) - (b.status ?? 999));
+  // Surface the most promising responses first: a login that sets a session
+  // cookie or answers 2xx/3xx (not 404) is the real endpoint.
+  const score = (r) => (r.sessionCookie ? 0 : 1) * 100
+    + (r.status && r.status >= 200 && r.status < 400 ? 0 : 1) * 10
+    + (r.kind === "json" ? 0 : 1);
+  results.sort((a, b) => score(a) - score(b) || (a.status ?? 999) - (b.status ?? 999));
   return { base, tried: results.length, top: results.slice(0, 12) };
 }
 
