@@ -80,6 +80,42 @@ export const config = {
     },
   },
 
+  // ---- Building-system clouds (credential-based, like Amilia) ----
+  // Each vendor's app/portal is cloud-backed, so the server can log in with the
+  // owner's credentials. APIs are private/undocumented: the /api/<name>/debug
+  // endpoints probe login routes so the mapping can be confirmed iteratively.
+
+  // Pro1 IAQ thermostats (the Pro1 phone app's cloud).
+  pro1: {
+    baseUrl: process.env.PRO1_BASE_URL || "https://app.pro1iaq.com",
+    email: process.env.PRO1_EMAIL || "",
+    password: process.env.PRO1_PASSWORD || "",
+    get configured() {
+      return Boolean(this.email && this.password);
+    },
+  },
+
+  // Napco alarm cloud (iBridge or Prima app account; set NAPCO_APP accordingly).
+  napco: {
+    baseUrl: process.env.NAPCO_BASE_URL || "",
+    app: (process.env.NAPCO_APP || "ibridge").toLowerCase(), // "ibridge" | "prima"
+    email: process.env.NAPCO_EMAIL || "",
+    password: process.env.NAPCO_PASSWORD || "",
+    get configured() {
+      return Boolean(this.email && this.password);
+    },
+  },
+
+  // GeoVision GV-Cloud Access Control (web portal login).
+  geovision: {
+    baseUrl: process.env.GV_BASE_URL || "https://www.gvaicloud.com",
+    email: process.env.GV_EMAIL || "",
+    password: process.env.GV_PASSWORD || "",
+    get configured() {
+      return Boolean(this.email && this.password);
+    },
+  },
+
   procare: {
     // ProCare has no broadly-available public API. If you obtain partner/API
     // access, set these. Until then the endpoint reports "not configured".
