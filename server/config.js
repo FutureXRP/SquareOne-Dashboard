@@ -71,6 +71,10 @@ export const config = {
     baseUrl: process.env.HIK_BASE_URL || "https://open.ezvizlife.com",
     appKey: process.env.HIK_APP_KEY || "",
     appSecret: process.env.HIK_APP_SECRET || "",
+    // Cameras with "video encryption" on need their verification code (the
+    // 6-letter sticker code) for live/snapshot calls. JSON by serial:
+    // HIK_DEVICE_CODES={"E27757063":"ABCDEF"}
+    deviceCodes: parseJsonEnv("HIK_DEVICE_CODES") || {},
     get configured() {
       return Boolean(this.appKey && this.appSecret);
     },
