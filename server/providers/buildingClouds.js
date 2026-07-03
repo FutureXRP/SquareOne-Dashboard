@@ -50,14 +50,16 @@ const LOGIN_PATHS = [
   "/auth/login", "/login",
 ];
 
-// Probe a vendor cloud: every plausible path × {json,form} × {email,username}.
-async function probeLogin(base, email, password) {
+// Probe a vendor cloud: every plausible path × body shape. `login` may be an
+// email or a bare username (Napco Gemini uses "Mat4185"), so cover both fields.
+async function probeLogin(base, login, password) {
   const results = [];
   for (const path of LOGIN_PATHS) {
     for (const [style, body] of [
-      ["json", { email, password }],
-      ["json", { username: email, password }],
-      ["form", { email, password }],
+      ["json", { username: login, password }],
+      ["json", { userName: login, password }],
+      ["json", { email: login, password }],
+      ["form", { username: login, password }],
     ]) {
       results.push(await attempt(base, path, body, style));
     }
@@ -90,11 +92,15 @@ export const pro1Router = makeProbeRouter("pro1", [
   "https://cloud.pro1iaq.com",
 ]);
 
-// Napco: iBridge and Prima ride different backends; NAPCO_BASE_URL pins it once known.
+// Napco Gemini commercial app (StarLink Connect). Registration lives on
+// NapcoComNet; the app's API host isn't published, so probe the likely ones.
+// NAPCO_BASE_URL pins it once the debug output reveals the real host.
 export const napcoRouter = makeProbeRouter("napco", [
-  "https://ibridge.napcocomnet.com",
-  "https://prima.napcosecurity.com",
-  "https://api.napcosecurity.com",
+  "https://api.napcocomnet.com",
+  "https://gemini.napcocomnet.com",
+  "https://www.napcocomnet.com",
+  "https://geminiapp.napcosecurity.com",
+  "https://starlinkconnect.napcosecurity.com",
 ]);
 
 // GeoVision GV-Cloud.

@@ -95,14 +95,17 @@ export const config = {
     },
   },
 
-  // Napco alarm cloud (iBridge or Prima app account; set NAPCO_APP accordingly).
+  // Napco alarm cloud. The building uses the "Gemini" commercial app (StarLink
+  // Connect communicator), which logs in with a USERNAME (e.g. "Mat4185"), not
+  // an email. NAPCO_EMAIL still accepted as an alias for the username field.
   napco: {
     baseUrl: process.env.NAPCO_BASE_URL || "",
-    app: (process.env.NAPCO_APP || "ibridge").toLowerCase(), // "ibridge" | "prima"
-    email: process.env.NAPCO_EMAIL || "",
+    app: (process.env.NAPCO_APP || "gemini").toLowerCase(), // "gemini" | "ibridge" | "prima"
+    username: process.env.NAPCO_USERNAME || process.env.NAPCO_EMAIL || "",
     password: process.env.NAPCO_PASSWORD || "",
+    get email() { return this.username; }, // probe helper reads .email
     get configured() {
-      return Boolean(this.email && this.password);
+      return Boolean(this.username && this.password);
     },
   },
 
