@@ -5,7 +5,9 @@ import {
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
   DoorOpen, Building2, TrendingUp, LogOut, DollarSign, Settings, KeyRound, Loader2, Check, Trash2,
+  LayoutGrid, Eye, EyeOff, ArrowLeft, ArrowRight, Pencil,
 } from "lucide-react";
+import { usePrefs } from "./usePrefs.js";
 
 // Compact currency, e.g. 1575 -> "$1,575". Non-numbers pass through as "$0".
 const fmtMoney = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -121,6 +123,7 @@ const MOCK_ELC = {
 
 export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}) {
   const [tab, setTab] = useState("home");
+  const [prefs, setPrefs] = usePrefs(); // per-user UI prefs (camera wall layout, …)
 
   const [log, setLog] = useState([]);
   const pushLog = useCallback(
@@ -274,7 +277,8 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
         {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
         {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
         {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
-        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik} />}
+        {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik}
+          layout={prefs.cameras || {}} onLayout={(cameras) => setPrefs({ cameras })} />}
         {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
         {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
         {tab === "automation" && <Automation />}
@@ -950,9 +954,53 @@ function Members({ members, live }) {
 }
 
 /* ----------------------------- CAMERAS (Hik-Connect) ----------------------------- */
-function Cameras({ cameras, snapshotUrl, liveEnabled }) {
+// Grid presets: how many cameras per screen -> column count for the wall.
+const CAM_SIZES = [
+  { n: 4, cols: 2 }, { n: 8, cols: 4 }, { n: 16, cols: 4 }, { n: 24, cols: 6 },
+];
+function Cameras({ cameras, snapshotUrl, liveEnabled, layout = {}, onLayout }) {
   const online = cameras.filter((c) => c.online).length;
-  const [liveCam, setLiveCam] = useState(null); // camera currently shown in the HLS modal
+  const [liveCam, setLiveCam] = useState(null);
+  const [arranging, setArranging] = useState(false);
+  const [page, setPage] = useState(0);
+
+  const size = layout.size ?? 8;              // number, or "all"
+  const hidden = new Set(layout.hidden || []);
+  const savedOrder = layout.order || [];
+
+  // Effective order: saved order first (that still exist), then any new cameras
+  // in API order. This is the full ordered id list we persist on reorder.
+  const byId = new Map(cameras.map((c) => [c.id, c]));
+  const orderedIds = [
+    ...savedOrder.filter((id) => byId.has(id)),
+    ...cameras.filter((c) => !savedOrder.includes(c.id)).map((c) => c.id),
+  ];
+  const orderedCams = orderedIds.map((id) => byId.get(id));
+  const shown = arranging ? orderedCams : orderedCams.filter((c) => !hidden.has(c.id));
+
+  const perPage = size === "all" ? Math.max(shown.length, 1) : size;
+  const pages = Math.max(1, Math.ceil(shown.length / perPage));
+  const curPage = Math.min(page, pages - 1);
+  const pageCams = shown.slice(curPage * perPage, curPage * perPage + perPage);
+  const cols = size === "all" ? 4 : (CAM_SIZES.find((s) => s.n === size)?.cols || 4);
+
+  // Persist a change (merged onto the current layout).
+  const save = (patch) => onLayout?.({ size, order: orderedIds, hidden: layout.hidden || [], ...patch });
+  const setSize = (n) => { save({ size: n }); setPage(0); };
+  const move = (id, dir) => {
+    const arr = [...orderedIds];
+    const i = arr.indexOf(id), j = i + dir;
+    if (j < 0 || j >= arr.length) return;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+    save({ order: arr });
+  };
+  const toggleHide = (id) => {
+    const h = new Set(hidden);
+    h.has(id) ? h.delete(id) : h.add(id);
+    save({ hidden: [...h] });
+  };
+  const reset = () => onLayout?.({ size: 8, order: [], hidden: [] });
+
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
@@ -960,55 +1008,121 @@ function Cameras({ cameras, snapshotUrl, liveEnabled }) {
         <Stat label="Online" value={online} icon={Wifi} color={online === cameras.length ? C.go : C.amber} />
         <Stat label="Recording" value={cameras.filter((c) => c.recording).length} icon={Activity} color={C.go} />
       </div>
-      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
-        {cameras.map((c) => {
-          const snap = c.online ? snapshotUrl(c.id) : null; // null in preview / when offline
-          const canLive = liveEnabled && c.online;
-          return (
-            <Panel key={c.id} title={c.name} accent={c.online ? C.go : C.red}
-              right={<span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 11, color: c.online ? C.go : C.red }}>
-                {c.online ? <Wifi size={12} /> : <WifiOff size={12} />}{c.online ? "online" : "offline"}
-              </span>}>
-              {/* Snapshot tile; click for live HLS when the camera is connected. */}
-              <button onClick={() => canLive && setLiveCam(c)} disabled={!canLive}
-                style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default" }}>
-                <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
-                  display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
-                  <Snapshot path={snap} name={c.name} online={c.online} />
-                  {c.recording && (
-                    <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
-                    </span>
-                  )}
-                  {canLive && (
-                    <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.25)", opacity: 0, transition: "opacity .15s" }}
-                      onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)} onMouseLeave={(e) => (e.currentTarget.style.opacity = 0)}>
-                      <span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 12, color: C.text, background: "rgba(0,0,0,.6)", padding: "6px 12px", borderRadius: 99 }}>
-                        <Video size={13} color={C.cyan} /> Live
-                      </span>
-                    </span>
-                  )}
-                </div>
-              </button>
-              <div className="flex items-center justify-between" style={{ marginTop: 10, fontFamily: mono, fontSize: 12, color: C.mid }}>
-                <span className="flex items-center gap-1.5"><Activity size={12} />motion {c.motion}</span>
-                {canLive && (
-                  <button onClick={() => setLiveCam(c)} className="so-btn flex items-center gap-1.5"
-                    style={{ padding: "4px 10px", borderRadius: 6, fontSize: 12, color: C.cyan, borderColor: C.cyan }}>
-                    <Video size={12} /> Live
-                  </button>
-                )}
-              </div>
-            </Panel>
-          );
-        })}
+
+      {/* Wall toolbar: grid size, arrange toggle, paging */}
+      <div className="flex items-center gap-3" style={{ flexWrap: "wrap", justifyContent: "space-between" }}>
+        <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
+          <span style={{ fontFamily: mono, fontSize: 11, color: C.dim, textTransform: "uppercase", letterSpacing: 1 }}>
+            <LayoutGrid size={12} style={{ verticalAlign: "-2px", marginRight: 5 }} />per screen
+          </span>
+          {CAM_SIZES.map((s) => (
+            <SizeBtn key={s.n} label={s.n} active={size === s.n} onClick={() => setSize(s.n)} />
+          ))}
+          <SizeBtn label="All" active={size === "all"} onClick={() => setSize("all")} />
+        </div>
+        <div className="flex items-center gap-2">
+          {arranging && <button onClick={reset} className="so-btn" style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12, color: C.mid }}>Reset</button>}
+          <button onClick={() => setArranging((a) => !a)} className="so-btn flex items-center gap-1.5"
+            style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 600,
+              color: arranging ? C.bg : C.cyan, background: arranging ? C.cyan : C.panel2, borderColor: C.cyan }}>
+            {arranging ? <><Check size={13} /> Done</> : <><Pencil size={13} /> Arrange</>}
+          </button>
+        </div>
       </div>
+      {arranging && (
+        <div style={{ fontSize: 12, color: C.dim, fontFamily: mono }}>
+          Use ◀ ▶ to reorder and the eye to show/hide a camera. Your layout is saved to your account.
+        </div>
+      )}
+
+      <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))` }}>
+        {pageCams.map((c) => (
+          <CameraTile key={c.id} c={c} snapshotUrl={snapshotUrl} liveEnabled={liveEnabled}
+            arranging={arranging} isHidden={hidden.has(c.id)}
+            onLive={() => setLiveCam(c)} onMove={(dir) => move(c.id, dir)} onToggleHide={() => toggleHide(c.id)} />
+        ))}
+      </div>
+
+      {pages > 1 && (
+        <div className="flex items-center justify-center gap-3" style={{ fontFamily: mono, fontSize: 12.5, color: C.mid }}>
+          <button onClick={() => setPage(Math.max(0, curPage - 1))} disabled={curPage === 0} className="so-btn"
+            style={{ padding: "5px 12px", borderRadius: 7, opacity: curPage === 0 ? 0.5 : 1 }}>Prev</button>
+          <span>Screen {curPage + 1} / {pages}</span>
+          <button onClick={() => setPage(Math.min(pages - 1, curPage + 1))} disabled={curPage >= pages - 1} className="so-btn"
+            style={{ padding: "5px 12px", borderRadius: 7, opacity: curPage >= pages - 1 ? 0.5 : 1 }}>Next</button>
+        </div>
+      )}
+
       {liveCam && (
         <Suspense fallback={null}>
           <LivePlayer camera={liveCam} onClose={() => setLiveCam(null)} />
         </Suspense>
       )}
     </div>
+  );
+}
+
+function SizeBtn({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} className="so-btn"
+      style={{ padding: "5px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 700, fontFamily: mono,
+        color: active ? C.bg : C.mid, background: active ? C.cyan : C.panel2, borderColor: active ? C.cyan : C.border }}>
+      {label}
+    </button>
+  );
+}
+
+function CameraTile({ c, snapshotUrl, liveEnabled, arranging, isHidden, onLive, onMove, onToggleHide }) {
+  const snap = c.online ? snapshotUrl(c.id) : null;
+  const canLive = liveEnabled && c.online && !arranging;
+  return (
+    <Panel title={c.name} accent={c.online ? C.go : C.red}
+      right={<span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 11, color: c.online ? C.go : C.red }}>
+        {c.online ? <Wifi size={12} /> : <WifiOff size={12} />}{c.online ? "online" : "offline"}
+      </span>}>
+      <button onClick={() => canLive && onLive()} disabled={!canLive}
+        style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default", opacity: arranging && isHidden ? 0.4 : 1 }}>
+        <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
+          display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
+          <Snapshot path={snap} name={c.name} online={c.online} />
+          {c.recording && !arranging && (
+            <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
+              <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
+            </span>
+          )}
+          {canLive && (
+            <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.25)", opacity: 0, transition: "opacity .15s" }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = 1)} onMouseLeave={(e) => (e.currentTarget.style.opacity = 0)}>
+              <span className="flex items-center gap-1.5" style={{ fontFamily: mono, fontSize: 12, color: C.text, background: "rgba(0,0,0,.6)", padding: "6px 12px", borderRadius: 99 }}>
+                <Video size={13} color={C.cyan} /> Live
+              </span>
+            </span>
+          )}
+        </div>
+      </button>
+      {arranging ? (
+        <div className="flex items-center justify-between" style={{ marginTop: 10 }}>
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => onMove(-1)} className="so-btn" title="Move earlier" style={{ padding: "5px 9px", borderRadius: 6, color: C.mid }}><ArrowLeft size={13} /></button>
+            <button onClick={() => onMove(1)} className="so-btn" title="Move later" style={{ padding: "5px 9px", borderRadius: 6, color: C.mid }}><ArrowRight size={13} /></button>
+          </div>
+          <button onClick={onToggleHide} className="so-btn flex items-center gap-1.5"
+            style={{ padding: "5px 10px", borderRadius: 6, fontSize: 12, color: isHidden ? C.dim : C.cyan, borderColor: isHidden ? C.border : C.cyan }}>
+            {isHidden ? <><EyeOff size={12} /> Hidden</> : <><Eye size={12} /> Shown</>}
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between" style={{ marginTop: 10, fontFamily: mono, fontSize: 12, color: C.mid }}>
+          <span className="flex items-center gap-1.5"><Activity size={12} />motion {c.motion}</span>
+          {canLive && (
+            <button onClick={onLive} className="so-btn flex items-center gap-1.5"
+              style={{ padding: "4px 10px", borderRadius: 6, fontSize: 12, color: C.cyan, borderColor: C.cyan }}>
+              <Video size={12} /> Live
+            </button>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }
 

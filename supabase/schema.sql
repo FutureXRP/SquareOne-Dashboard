@@ -108,6 +108,16 @@ create table if not exists user_credentials (
 );
 
 -- ---------------------------------------------------------------------------
+-- Per-user UI preferences (camera wall layout, etc.) — non-secret. One JSON
+-- blob per user, managed via /api/me/prefs. Service-role only for consistency.
+-- ---------------------------------------------------------------------------
+create table if not exists user_prefs (
+  user_id     uuid primary key references auth.users(id) on delete cascade,
+  prefs       jsonb not null default '{}'::jsonb,
+  updated_at  timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location
 -- ---------------------------------------------------------------------------
 create or replace function role_at(loc uuid)
@@ -146,6 +156,7 @@ alter table audit_log           enable row level security;
 alter table okdhs_imports       enable row level security;
 alter table token_cache         enable row level security;  -- no policies = service-role only
 alter table user_credentials    enable row level security;  -- no policies = service-role only
+alter table user_prefs          enable row level security;  -- no policies = service-role only
 
 -- Profiles: a user sees/edits their own; admins see all.
 create policy profiles_self on profiles
