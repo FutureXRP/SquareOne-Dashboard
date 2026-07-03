@@ -219,6 +219,14 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
   const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
   const pageTitle = (TABS.find(([id]) => id === tab) || [, "Home"])[1];
 
+  // Visible tabs: Home and Settings are always available; the rest can be turned
+  // off per user (by the person or by an admin) via prefs.tabs.
+  const tabPrefs = prefs.tabs || {};
+  const visibleTabs = TABS.filter(([id]) => id === "home" || id === "settings" || tabPrefs[id] !== false);
+  useEffect(() => {
+    if (!visibleTabs.some(([id]) => id === tab)) setTab("home");
+  }, [tabPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: sans, minHeight: "100%" }}>
       <style>{`
@@ -270,7 +278,7 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
             </div>
           </div>
           <nav className="so-nav">
-            {TABS.map(([id, label, Icon]) => {
+            {visibleTabs.map(([id, label, Icon]) => {
               const active = tab === id;
               const alert = id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup);
               return (
@@ -316,7 +324,8 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
             {tab === "automation" && <Automation />}
             {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
             {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
-            {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} />}
+            {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} role={role}
+              tabPrefs={tabPrefs} onTabPrefs={(tabs) => setPrefs({ tabs })} />}
           </div>
         </main>
       </div>
@@ -336,7 +345,10 @@ const CRED_PROVIDERS = [
   { key: "hik", label: "Hik Cameras", hint: "Your Hik-Connect user ID (for attribution in the camera log)", user: "Hik user ID", hasSecret: false },
 ];
 
-function SettingsPage({ user, authEnabled }) {
+// Tabs a user can turn off for themselves (Home and Settings always stay).
+const TOGGLEABLE_TABS = TABS.filter(([id]) => id !== "home" && id !== "settings");
+
+function SettingsPage({ user, authEnabled, role, tabPrefs = {}, onTabPrefs }) {
   const [state, setState] = useState(null); // { cryptoReady, providers }
   const load = useCallback(() => {
     apiFetch("/api/me/credentials").then((r) => r.json())
@@ -344,9 +356,12 @@ function SettingsPage({ user, authEnabled }) {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  if (authEnabled && !user) return <Empty text="Sign in to manage your credentials." />;
+  if (authEnabled && !user) return <Empty text="Sign in to manage your settings." />;
   return (
     <div className="grid gap-3">
+      <MyTabsPanel tabPrefs={tabPrefs} onTabPrefs={onTabPrefs} />
+      {role === "admin" && <TeamPanel />}
+      {role === "admin" && <ActivityPanel />}
       <Panel title="My Credentials" accent={C.cyan}
         right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>{user?.email}</span>}>
         <div style={{ fontSize: 13, color: C.mid, paddingBottom: 10, lineHeight: 1.5 }}>
@@ -435,6 +450,156 @@ function Diagnostics() {
 function noteStyle(color) {
   return { margin: "6px 0 12px", padding: "9px 12px", borderRadius: 7, fontSize: 12.5,
     background: C.panel2, border: `1px solid ${color}`, color };
+}
+
+// A small on/off switch.
+function Toggle({ on, onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled} role="switch" aria-checked={on}
+      style={{ width: 40, height: 23, borderRadius: 99, border: "none", cursor: disabled ? "default" : "pointer",
+        background: on ? C.go : C.borderHi, position: "relative", transition: "background .15s", opacity: disabled ? 0.5 : 1, flexShrink: 0 }}>
+      <span style={{ position: "absolute", top: 2, left: on ? 19 : 2, width: 19, height: 19, borderRadius: 99,
+        background: "#fff", transition: "left .15s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" }} />
+    </button>
+  );
+}
+
+// My Tabs — each person shows/hides their own nav tabs.
+function MyTabsPanel({ tabPrefs, onTabPrefs }) {
+  const set = (id, on) => onTabPrefs?.({ ...tabPrefs, [id]: on });
+  return (
+    <Panel title="My Tabs" accent={C.cyan}>
+      <div style={{ fontSize: 13, color: C.mid, paddingBottom: 6, lineHeight: 1.5 }}>
+        Choose which sections appear in your sidebar. Home and Settings always stay.
+      </div>
+      {TOGGLEABLE_TABS.map(([id, label, Icon]) => (
+        <div key={id} className="flex items-center justify-between" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
+          <span className="flex items-center gap-2" style={{ fontSize: 14 }}><Icon size={15} color={C.mid} />{label}</span>
+          <Toggle on={tabPrefs[id] !== false} onClick={() => set(id, tabPrefs[id] === false)} />
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
+// Team — admin: create logins, set role, control each user's visible tabs.
+function TeamPanel() {
+  const [users, setUsers] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [form, setForm] = useState({ email: "", password: "", role: "staff" });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = useCallback(() => {
+    apiFetch("/api/admin/users").then((r) => r.json()).then((j) => { if (j.ok) setUsers(j.data); }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await apiFetch("/api/admin/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then((res) => res.json());
+      if (!r.ok) throw new Error(r.message || "Could not create user");
+      setForm({ email: "", password: "", role: "staff" }); setMsg({ ok: true, text: `Created ${r.data.email}` }); load();
+    } catch (e) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
+  };
+  const setRole = async (id, role) => { await apiFetch(`/api/admin/users/${id}/role`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }); load(); };
+  const setUserTab = async (u, id, on) => {
+    const tabs = { ...(u.tabs || {}), [id]: on };
+    await apiFetch(`/api/admin/users/${u.id}/tabs`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tabs }) });
+    load();
+  };
+  const remove = async (u) => {
+    if (!window.confirm(`Remove ${u.email}? This deletes their login.`)) return;
+    await apiFetch(`/api/admin/users/${u.id}`, { method: "DELETE" }); load();
+  };
+
+  return (
+    <Panel title="Team" accent={C.navy} right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>admin</span>}>
+      {/* Create login */}
+      <div style={{ padding: "4px 0 14px", borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 8 }}>Create a login</div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "1.4fr 1fr auto auto" }}>
+          <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="email@squareonecompassion.com" style={inputStyle} />
+          <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Temp password (8+ chars)" style={inputStyle} />
+          <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} style={{ ...inputStyle, cursor: "pointer" }}>
+            <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
+          </select>
+          <button onClick={create} disabled={busy || !form.email || form.password.length < 8}
+            style={{ padding: "0 16px", borderRadius: 7, border: "none", cursor: "pointer", background: C.cyan, color: "#fff", fontWeight: 700, fontSize: 13 }}>
+            {busy ? <Loader2 size={14} className="spin" /> : "Create"}
+          </button>
+        </div>
+        {msg && <div style={{ marginTop: 8, fontSize: 12, fontFamily: mono, color: msg.ok ? C.go : C.red }}>{msg.text}</div>}
+      </div>
+
+      {/* User list */}
+      {!users && <div style={{ padding: "10px 0", color: C.dim, fontFamily: mono, fontSize: 12.5 }}>Loading…</div>}
+      {users?.map((u) => (
+        <div key={u.id} style={{ padding: "11px 0", borderBottom: `1px solid ${C.border}` }}>
+          <div className="flex items-center justify-between gap-3">
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
+              <div style={{ fontSize: 11, color: C.dim, fontFamily: mono }}>
+                {u.lastSignIn ? `last in ${new Date(u.lastSignIn).toLocaleDateString([], { month: "short", day: "numeric" })}` : "never signed in"}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <select value={u.role || "staff"} onChange={(e) => setRole(u.id, e.target.value)} style={{ ...inputStyle, padding: "6px 8px", cursor: "pointer" }}>
+                <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
+              </select>
+              <button onClick={() => setExpanded(expanded === u.id ? null : u.id)} className="so-btn" style={{ padding: "6px 11px", borderRadius: 7, fontSize: 12, color: C.mid }}>Tabs</button>
+              <button onClick={() => remove(u)} className="so-btn" title="Remove" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
+            </div>
+          </div>
+          {expanded === u.id && (
+            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", marginTop: 10, padding: "10px 12px", background: C.panel2, borderRadius: 8 }}>
+              {TOGGLEABLE_TABS.map(([id, label, Icon]) => {
+                const on = (u.tabs || {})[id] !== false;
+                return (
+                  <label key={id} className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer", color: C.text }}>
+                    <input type="checkbox" checked={on} onChange={() => setUserTab(u, id, !on)} />
+                    <Icon size={13} color={C.mid} />{label}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
+// Activity — admin: recent sign-ins/outs and actions, newest first.
+function ActivityPanel() {
+  const [rows, setRows] = useState(null);
+  const [authOnly, setAuthOnly] = useState(true);
+  const load = useCallback((auth) => {
+    apiFetch(`/api/admin/activity${auth ? "?kind=auth" : ""}`).then((r) => r.json()).then((j) => { if (j.ok) setRows(j.data); }).catch(() => {});
+  }, []);
+  useEffect(() => { load(authOnly); }, [authOnly, load]);
+  const nice = (a) => ({ "auth.signin": "Signed in", "auth.signout": "Signed out" }[a] || a);
+  const isAuth = (a) => a?.startsWith("auth.");
+  return (
+    <Panel title="Activity Log" accent={C.amber}
+      right={
+        <button onClick={() => setAuthOnly((v) => !v)} className="so-btn" style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11.5, color: C.mid }}>
+          {authOnly ? "Sign-ins only" : "All activity"}
+        </button>}>
+      {!rows && <div style={{ padding: "10px 0", color: C.dim, fontFamily: mono, fontSize: 12.5 }}>Loading…</div>}
+      {rows && rows.length === 0 && <Empty text="No activity yet." />}
+      {rows?.map((r, i) => (
+        <div key={i} className="flex items-center gap-3" style={{ padding: "8px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13 }}>
+          <span style={{ fontFamily: mono, fontSize: 11.5, color: C.dim, minWidth: 128 }}>
+            {new Date(r.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+          </span>
+          <span style={{ fontFamily: mono, fontSize: 11, fontWeight: 700, color: isAuth(r.action) ? C.go : C.cyan, minWidth: 78 }}>{nice(r.action)}</span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.email}</span>
+        </div>
+      ))}
+    </Panel>
+  );
 }
 
 function CredRow({ def, current, disabled, onSaved }) {

@@ -11,6 +11,8 @@ import { doorsRouter } from "./providers/doorSchedule.js";
 import { alertsRouter } from "./providers/memberAlerts.js";
 import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingClouds.js";
 import { meRouter } from "./providers/userCreds.js";
+import { adminRouter } from "./providers/admin.js";
+import { requireAdmin } from "./auth.js";
 
 /*
   The Express app, shared by local dev (server/index.js -> listen) and Vercel
@@ -56,5 +58,7 @@ app.use("/api/geovision", requireAuth, geovisionRouter);
 // Per-user vendor credentials (Settings page): each operator's own login so
 // device actions attribute to them in the vendor's logs.
 app.use("/api/me", requireAuth, meRouter);
+// Admin team management (create users, roles, per-user tab visibility, activity).
+app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
 
 export default app;

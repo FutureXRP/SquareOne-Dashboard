@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, supabaseEnabled } from "./lib/supabase.js";
+import { apiFetch } from "./lib/api.js";
+
+const recordActivity = (event) =>
+  apiFetch("/api/me/activity", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event }),
+  }).catch(() => {});
 
 /*
   Auth state. When Supabase is configured, tracks the session + the user's role.
@@ -16,7 +23,14 @@ export function useAuth() {
       setSession(data.session);
       setLoading(false);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((evt, s) => {
+      setSession(s);
+      // Log one sign-in per browser session (SIGNED_IN also fires on refresh).
+      if (evt === "SIGNED_IN" && s?.user) {
+        const key = `so-signin-${s.user.id}`;
+        if (!sessionStorage.getItem(key)) { sessionStorage.setItem(key, "1"); recordActivity("signin"); }
+      }
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -33,7 +47,14 @@ export function useAuth() {
     return () => { cancelled = true; };
   }, [session]);
 
-  const signOut = useCallback(() => supabase?.auth.signOut(), []);
+  // Record the sign-out while the session is still valid, then sign out.
+  const signOut = useCallback(async () => {
+    if (session?.user) {
+      sessionStorage.removeItem(`so-signin-${session.user.id}`);
+      await recordActivity("signout");
+    }
+    return supabase?.auth.signOut();
+  }, [session]);
 
   return {
     enabled: supabaseEnabled,
