@@ -187,6 +187,26 @@ geovisionRouter.get(
       (a.cookie ? 0 : 1) - (b.cookie ? 0 : 1) ||
       ((a.status >= 200 && a.status < 400) ? 0 : 1) - ((b.status >= 200 && b.status < 400) ? 0 : 1) ||
       (a.status ?? 999) - (b.status ?? 999));
-    return { base: c.baseUrl, account: u, attempts: attempts.slice(0, 16) };
+
+    // The login redirects to /asweb/Login/ — that's the web login FORM. Fetch it
+    // so we can read the real field names, the form action, and any hidden
+    // token, then replicate the exact POST. Also grab the ASWeb root.
+    const pageOf = async (path) => {
+      try {
+        const res = await fetch(`${c.baseUrl}${path}`, { headers: { Accept: "text/html,*/*" }, redirect: "manual", signal: AbortSignal.timeout(9000) });
+        const html = await res.text();
+        // Pull out <form ...> tags and every input's name/id/type so the login
+        // shape is visible without dumping the whole page.
+        const forms = (html.match(/<form[^>]*>/gi) || []).slice(0, 4);
+        const inputs = (html.match(/<input[^>]*>/gi) || [])
+          .map((t) => (t.match(/(name|id|type)\s*=\s*"[^"]*"/gi) || []).join(" "))
+          .filter(Boolean).slice(0, 25);
+        const scripts = (html.match(/(login|auth|api)[A-Za-z0-9_/.]*/gi) || []).slice(0, 20);
+        return { path, status: res.status, cookie: res.headers.get("set-cookie") ? res.headers.get("set-cookie").split("=")[0] : undefined, forms, inputs, apiHints: [...new Set(scripts)] };
+      } catch (e) { return { path, error: e.message }; }
+    };
+    const pages = [await pageOf("/asweb/Login/"), await pageOf("/asweb/")];
+
+    return { base: c.baseUrl, account: u, attempts: attempts.slice(0, 8), pages };
   })
 );
