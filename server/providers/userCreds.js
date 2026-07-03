@@ -103,6 +103,34 @@ meRouter.put("/credentials/:provider", requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/me/prefs — this user's UI preferences (camera layout, etc.).
+meRouter.get("/prefs", requireAuth, async (req, res) => {
+  if (!authEnabled || !req.user) return res.json({ ok: true, data: {} });
+  try {
+    const { data } = await supabaseAdmin.from("user_prefs").select("prefs").eq("user_id", req.user.id).maybeSingle();
+    res.json({ ok: true, data: data?.prefs || {} });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// PUT /api/me/prefs — shallow-merge a patch into this user's prefs blob.
+meRouter.put("/prefs", requireAuth, async (req, res) => {
+  if (!authEnabled || !req.user) return res.json({ ok: true }); // preview: client uses localStorage
+  try {
+    const patch = req.body && typeof req.body === "object" ? req.body : {};
+    const { data } = await supabaseAdmin.from("user_prefs").select("prefs").eq("user_id", req.user.id).maybeSingle();
+    const prefs = { ...(data?.prefs || {}), ...patch };
+    await supabaseAdmin.from("user_prefs").upsert(
+      { user_id: req.user.id, prefs, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" }
+    );
+    res.json({ ok: true, data: prefs });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
 // DELETE /api/me/credentials/:provider — remove this user's stored login.
 meRouter.delete("/credentials/:provider", requireAuth, async (req, res) => {
   const { provider } = req.params;
