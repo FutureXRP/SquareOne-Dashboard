@@ -48,6 +48,8 @@ const LOGIN_PATHS = [
   "/api/login", "/api/auth/login", "/api/v1/auth/login", "/api/v1/login",
   "/api/account/login", "/api/user/login", "/api/users/login", "/api/session",
   "/auth/login", "/login",
+  // GV-ASManager mobile web service routes (GV-Access app backend).
+  "/Login", "/asweb/api/login", "/ASManager/api/login", "/Mobile/Login", "/api/Account/Login",
 ];
 
 // Probe a vendor cloud: every plausible path × body shape. `login` may be an
@@ -103,8 +105,6 @@ export const napcoRouter = makeProbeRouter("napco", [
   "https://starlinkconnect.napcosecurity.com",
 ]);
 
-// GeoVision GV-Cloud.
-export const geovisionRouter = makeProbeRouter("geovision", [
-  "https://api.gvaicloud.com",
-  "https://gvaicloud.com",
-]);
+// GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
+// hosts to guess: the app talks to one server address, which the owner supplies.
+export const geovisionRouter = makeProbeRouter("geovision");

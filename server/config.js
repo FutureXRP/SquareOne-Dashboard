@@ -109,13 +109,17 @@ export const config = {
     },
   },
 
-  // GeoVision GV-Cloud Access Control (web portal login).
+  // GeoVision doors. The building runs the GV-Access mobile app against an
+  // on-prem GV-ASManager server (named "SQONE") with Controller 1 & 2. Since
+  // the app works remotely, that server is reachable over the internet — set
+  // GV_BASE_URL to the same host/DDNS + port the GV-Access app connects to.
   geovision: {
-    baseUrl: process.env.GV_BASE_URL || "https://www.gvaicloud.com",
-    email: process.env.GV_EMAIL || "",
+    baseUrl: process.env.GV_BASE_URL || "", // e.g. https://sqone.ddns.net:port
+    username: process.env.GV_USERNAME || process.env.GV_EMAIL || "",
     password: process.env.GV_PASSWORD || "",
+    get email() { return this.username; }, // probe helper reads .email
     get configured() {
-      return Boolean(this.email && this.password);
+      return Boolean(this.baseUrl && this.username && this.password);
     },
   },
 
