@@ -229,46 +229,65 @@ amiliaRouter.get(
 export async function allMembershipPersons() {
   const jwt = await getJwt();
   const list = await listMemberships(jwt);
-  const out = [];
-  for (const m of list) {
+  const perPlan = await Promise.all(list.map(async (m) => {
     const { items } = await fetchPersons(m.Id ?? m.id, jwt);
-    for (const p of items) out.push({ membershipId: m.Id ?? m.id, membership: m.Name ?? m.name ?? "", person: p });
-  }
-  return out;
+    return items.map((p) => ({ membershipId: m.Id ?? m.id, membership: m.Name ?? m.name ?? "", person: p }));
+  }));
+  return perPlan.flat();
 }
 
 // The default /memberships list excludes archived (discontinued) plans, but a
 // discontinued plan can still have grandfathered members paying its fee. Try the
-// archived-list variants and merge any extra plans found (dedup by Id).
+// archived-list variants and merge any extra plans found (dedup by Id). Which
+// variant works (or that none do) is cached for a day so routine loads don't
+// spend three probe calls rediscovering it.
+const kvScope = () => String(config.amilia.orgId || "default");
+const ARCHIVED_VARIANTS = ["?showArchived=true", "?isArchived=true", "?includeArchived=true"];
+
 async function listMemberships(jwt) {
   const base = await get("/memberships", jwt);
   const list = [...(base?.Items || (Array.isArray(base) ? base : []))];
   const seen = new Set(list.map((m) => m.Id ?? m.id));
-  for (const q of ["?showArchived=true", "?isArchived=true", "?includeArchived=true"]) {
+  const merge = (r) => {
+    const extra = (r?.Items || (Array.isArray(r) ? r : [])).filter((m) => !seen.has(m.Id ?? m.id));
+    extra.forEach((m) => { seen.add(m.Id ?? m.id); list.push({ ...m, IsArchived: true }); });
+    return extra.length;
+  };
+
+  const cached = await getCachedToken("amilia-archived-variant", kvScope());
+  const remember = (v) => setCachedToken("amilia-archived-variant", kvScope(), v, {}, Date.now() + 24 * 3600 * 1000);
+  if (cached) {
+    if (cached.token !== "none") {
+      try { merge(await get(`/memberships${cached.token}`, jwt)); } catch { /* variant stopped working — rediscover next day */ }
+    }
+    return list;
+  }
+  for (const q of ARCHIVED_VARIANTS) {
     try {
       const r = await get(`/memberships${q}`, jwt);
-      const extra = (r?.Items || (Array.isArray(r) ? r : [])).filter((m) => !seen.has(m.Id ?? m.id));
-      if (extra.length) {
-        extra.forEach((m) => { seen.add(m.Id ?? m.id); list.push({ ...m, IsArchived: true }); });
-        break; // one working variant is enough
-      }
+      if (merge(r)) { await remember(q); return list; }
     } catch { /* unsupported param — try the next */ }
   }
+  await remember("none");
   return list;
 }
 
 // Membership summary. Each "membership" is a type/tier; per-type counts come from
-// the Paging.TotalCount of its persons list.
+// the Paging.TotalCount of its persons list. The result is kv-cached briefly so
+// page loads render instantly instead of waiting on ~8 upstream Amilia calls —
+// the per-plan work runs in parallel when the cache is cold.
+const SUMMARY_TTL = 150_000; // effective ~90s freshness (store SKEW is 60s)
+
 amiliaRouter.get(
   "/members/summary",
   guard("amilia", async () => {
+    const cached = await getCachedToken("amilia-summary", kvScope());
+    if (cached) return JSON.parse(cached.token);
+
     const jwt = await getJwt();
     const list = await listMemberships(jwt);
 
-    const byType = [];
-    let total = 0;
-    let projectedRevenue = 0; // sum of membership list price × number of FEES (not headcount)
-    for (const m of list) {
+    const rows = await Promise.all(list.map(async (m) => {
       const id = m.Id ?? m.id;
       const price = Number(m.Price) || 0;
 
@@ -277,7 +296,7 @@ amiliaRouter.get(
 
       // Discontinued plans: keep them while grandfathered members still pay the
       // fee (tagged legacy below), drop them for good once nobody's left.
-      if (m.IsArchived && count === 0) continue;
+      if (m.IsArchived && count === 0) return null;
 
       // Number of fees this membership generates. Verified against this org's
       // live data (2026-07): person records carry AccountId, and for the
@@ -301,13 +320,14 @@ amiliaRouter.get(
         fees = count; basis = "per-person";
       }
 
-      const revenue = price * fees;
-      total += count;
-      projectedRevenue += revenue;
-      byType.push({ type: name, count, fees, price, revenue, basis, legacy: Boolean(m.IsArchived) });
-    }
+      return { type: name, count, fees, price, revenue: price * fees, basis, legacy: Boolean(m.IsArchived) };
+    }));
 
-    return {
+    const byType = rows.filter(Boolean);
+    const total = byType.reduce((s, r) => s + r.count, 0);
+    const projectedRevenue = byType.reduce((s, r) => s + r.revenue, 0);
+
+    const summary = {
       total,
       active: total,            // refine with ?status=Active once you confirm status values
       newThisMonth: 0,          // derive from registrations/date filters when needed
@@ -316,6 +336,8 @@ amiliaRouter.get(
       projectedRevenue,         // membership list price × number of fees (family plans billed once)
       byType,                   // each: { type, count (people), fees (billed units), price, revenue, basis }
     };
+    await setCachedToken("amilia-summary", kvScope(), JSON.stringify(summary), {}, Date.now() + SUMMARY_TTL);
+    return summary;
   })
 );
 

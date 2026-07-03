@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { config, guard, http } from "../config.js";
-import { requireAdmin, logAudit } from "../auth.js";
+import { requireAuth, requireAdmin, logAudit } from "../auth.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
 import { allMembershipPersons } from "./amilia.js";
 
@@ -23,6 +23,17 @@ export const alertsRouter = Router();
 const KV_PROVIDER = "member-alerts";
 const KV_SCOPE = "known-roster";
 const FOREVER = 10 * 365 * 24 * 3600 * 1000;
+const CHECK_GATE_TTL = 120_000; // kv store's 60s skew makes this an effective ~60s gate
+
+// Ring buffer of recent sign-up events, shown in the dashboard's Alerts tab.
+async function readRecent() {
+  const r = await getCachedToken(KV_PROVIDER, "recent");
+  try { return r ? JSON.parse(r.token) : []; } catch { return []; }
+}
+async function appendRecent(entry) {
+  const recent = [entry, ...(await readRecent())].slice(0, 20);
+  await setCachedToken(KV_PROVIDER, "recent", JSON.stringify(recent), {}, Date.now() + FOREVER);
+}
 
 export async function sendSms(body) {
   const { twilio, phone } = config.alerts;
@@ -89,22 +100,45 @@ export async function checkNewMembers(req) {
     const fresh = [...current.entries()].filter(([k]) => !known.has(k)).map(([, e]) => e);
     if (!fresh.length) return { alerted: 0 };
 
+    // Record in the in-app feed first — the dashboard shows sign-ups even when
+    // no email/SMS channel is configured (or a send fails).
+    const names = fresh.slice(0, 8).map(label);
+    const more = fresh.length > 8 ? fresh.length - 8 : 0;
+    await appendRecent({ at: new Date().toISOString(), count: fresh.length, members: names, more });
+
     let sent = false, errors = [];
     if (config.alerts.configured) {
-      const names = fresh.slice(0, 8).map(label).join(", ");
-      const more = fresh.length > 8 ? ` +${fresh.length - 8} more` : "";
       const plural = fresh.length === 1 ? "New member" : `${fresh.length} new members`;
-      ({ sent, errors } = await sendAlert(`SquareOne: ${plural}`, `${names}${more}`));
+      ({ sent, errors } = await sendAlert(`SquareOne: ${plural}`, `${names.join(", ")}${more ? ` +${more} more` : ""}`));
     }
-    // Mark them seen when an alert went out (or no channel is set up at all).
-    // On a total send failure, leave them unseen so the next tick retries.
-    if (sent || !config.alerts.configured) await save();
+    // The in-app feed has the alert either way — mark the roster seen so the
+    // same people aren't re-announced every tick.
+    await save();
     logAudit(req, "alerts.new-members", null, { count: fresh.length, sent });
     return { alerted: fresh.length, sent, alertsConfigured: config.alerts.configured, errors };
   } catch (e) {
     return { error: e.message };
   }
 }
+
+// Recent sign-up feed for the dashboard's Alerts tab.
+alertsRouter.get("/recent", requireAuth, async (_req, res) => {
+  res.json({ ok: true, data: await readRecent() });
+});
+
+// On-demand check the browser polls while the dashboard is open — much faster
+// than waiting for the 5-minute cron. Gated in the kv so no matter how many
+// tabs are open (or how often they poll), Amilia is hit at most ~once a minute.
+alertsRouter.all("/check", requireAuth, async (req, res) => {
+  let checked = false, result = null;
+  const gate = await getCachedToken(KV_PROVIDER, "check-gate");
+  if (!gate) {
+    await setCachedToken(KV_PROVIDER, "check-gate", "1", {}, Date.now() + CHECK_GATE_TTL);
+    result = await checkNewMembers(req);
+    checked = true;
+  }
+  res.json({ ok: true, data: { checked, result, recent: await readRecent() } });
+});
 
 // Admin: verify the alert wiring end-to-end on every configured channel.
 alertsRouter.get(
