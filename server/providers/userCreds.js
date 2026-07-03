@@ -103,6 +103,14 @@ meRouter.put("/credentials/:provider", requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/me/activity { event } — record this user's sign-in / sign-out.
+meRouter.post("/activity", requireAuth, async (req, res) => {
+  const event = (req.body && req.body.event) || "";
+  if (!["signin", "signout"].includes(event)) return res.status(400).json({ ok: false, message: "Unknown event." });
+  await logAudit(req, `auth.${event}`, null, {});
+  res.json({ ok: true });
+});
+
 // GET /api/me/prefs — this user's UI preferences (camera layout, etc.).
 meRouter.get("/prefs", requireAuth, async (req, res) => {
   if (!authEnabled || !req.user) return res.json({ ok: true, data: {} });
