@@ -21,6 +21,7 @@ export function LivePlayer({ camera, onClose }) {
   useEffect(() => {
     let hls;
     let cancelled = false;
+    let slowTimer;
 
     (async () => {
       try {
@@ -30,6 +31,20 @@ export function LivePlayer({ camera, onClose }) {
         if (cancelled) return;
 
         const video = videoRef.current;
+        // Flip to "playing" only when real frames arrive — otherwise the loader
+        // hides and the user just sees black while the stream spins up.
+        const onPlaying = () => { if (!cancelled) setStatus("playing"); };
+        video.addEventListener("playing", onPlaying);
+        video.addEventListener("loadeddata", onPlaying);
+
+        // EZVIZ live streams can take several seconds to start; nudge the user
+        // rather than leaving an ambiguous black frame.
+        slowTimer = setTimeout(() => {
+          if (!cancelled && video.readyState < 2) {
+            setError("Still connecting… EZVIZ live can take 10-15s to start. If it stays black, this camera likely has Video Encryption on — turn it off in the app or add its code to HIK_DEVICE_CODES.");
+          }
+        }, 9000);
+
         if (video.canPlayType("application/vnd.apple.mpegurl")) {
           video.src = url; // native HLS (Safari/iOS)
         } else if (Hls.isSupported()) {
@@ -43,13 +58,12 @@ export function LivePlayer({ camera, onClose }) {
           throw new Error("HLS playback isn't supported in this browser.");
         }
         video.play?.().catch(() => {});
-        if (!cancelled) setStatus("playing");
       } catch (e) {
         if (!cancelled) { setStatus("error"); setError(e.message); }
       }
     })();
 
-    return () => { cancelled = true; if (hls) hls.destroy(); };
+    return () => { cancelled = true; clearTimeout(slowTimer); if (hls) hls.destroy(); };
   }, [camera.id]);
 
   return (
@@ -66,8 +80,11 @@ export function LivePlayer({ camera, onClose }) {
           <video ref={videoRef} controls autoPlay muted playsInline
             style={{ width: "100%", height: "100%", objectFit: "contain", display: status === "error" ? "none" : "block" }} />
           {status === "loading" && (
-            <div className="flex items-center gap-2" style={{ position: "absolute", color: C.mid, fontFamily: mono, fontSize: 13 }}>
-              <Loader2 size={16} className="spin" /> connecting to stream…
+            <div style={{ position: "absolute", color: C.mid, fontFamily: mono, fontSize: 13, textAlign: "center", padding: 24, maxWidth: 460 }}>
+              <div className="flex items-center gap-2" style={{ justifyContent: "center" }}>
+                <Loader2 size={16} className="spin" /> connecting to stream…
+              </div>
+              {error && <div style={{ marginTop: 12, color: C.mid, lineHeight: 1.5 }}>{error}</div>}
             </div>
           )}
           {status === "error" && (
