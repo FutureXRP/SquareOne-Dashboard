@@ -26,10 +26,21 @@ async function ezvizPost(path, params, base) {
     body: form(params),
   });
   if (body && body.code && body.code !== "200") {
+    // 60019: the camera has "video encryption" on and wants its verification code.
+    if (String(body.code) === "60019") {
+      throw new Error(
+        "this camera's Video Encryption is on — either turn it off in the EZVIZ/Hik-Connect app " +
+        "(device Settings → Privacy → Video Encryption) or add its 6-letter verification code to the " +
+        'HIK_DEVICE_CODES env var, e.g. {"SERIAL":"ABCDEF"}'
+      );
+    }
     throw new Error(`EZVIZ ${path} -> code ${body.code}: ${body.msg}`);
   }
   return body?.data;
 }
+
+// The device verification code, when configured (needed for encrypted cameras).
+const codeFor = (serial) => config.hik.deviceCodes[serial] || undefined;
 
 // EZVIZ is region-partitioned. The account may live on any of these hosts; the
 // token/get call only succeeds on the right one, and its response tells us the
@@ -44,6 +55,11 @@ const TOKEN_HOSTS = () =>
     "https://open.ys7.com",
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
+// Cache scope includes the appKey, so swapping to different keys in Vercel
+// immediately invalidates the old account's cached token instead of serving
+// its (possibly empty) device list for up to 7 days.
+const tokenScope = () => `k-${(config.hik.appKey || "none").slice(-10)}`;
+
 // Force a fresh token by trying each regional host. Returns { accessToken, areaDomain, host }.
 async function fetchToken() {
   const attempts = [];
@@ -57,7 +73,7 @@ async function fetchToken() {
       if (data?.accessToken) {
         const areaDomain = data.areaDomain || host;
         const expireAt = data.expireTime || Date.now() + 6.5 * 24 * 3600 * 1000;
-        await setCachedToken("hik", "default", data.accessToken, { areaDomain, host }, expireAt);
+        await setCachedToken("hik", tokenScope(), data.accessToken, { areaDomain, host }, expireAt);
         return { accessToken: data.accessToken, areaDomain, host };
       }
       attempts.push(`${host}: no accessToken`);
@@ -69,7 +85,7 @@ async function fetchToken() {
 }
 
 async function getToken() {
-  const cached = await getCachedToken("hik");
+  const cached = await getCachedToken("hik", tokenScope());
   if (cached) return { accessToken: cached.token, areaDomain: cached.meta.areaDomain || config.hik.baseUrl };
   return fetchToken();
 }
@@ -107,7 +123,7 @@ hikRouter.get(
     const { accessToken, areaDomain } = await getToken();
     const data = await ezvizPost(
       "/api/lapp/device/capture",
-      { accessToken, deviceSerial: req.params.id, channelNo: 1 },
+      { accessToken, deviceSerial: req.params.id, channelNo: 1, code: codeFor(req.params.id) },
       areaDomain
     );
     if (!data?.picUrl) throw new Error("no picUrl returned (camera may be offline)");
@@ -127,7 +143,7 @@ hikRouter.get(
     const { accessToken, areaDomain } = await getToken();
     const data = await ezvizPost(
       "/api/lapp/live/address/get",
-      { accessToken, deviceSerial: req.params.id, channelNo: 1, protocol: 2, quality: 1 },
+      { accessToken, deviceSerial: req.params.id, channelNo: 1, protocol: 2, quality: 1, code: codeFor(req.params.id) },
       areaDomain
     );
     return { url: data?.url, expireTime: data?.expireTime };
