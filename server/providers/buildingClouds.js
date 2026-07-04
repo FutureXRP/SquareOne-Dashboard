@@ -308,3 +308,41 @@ geovisionRouter.get(
     };
   })
 );
+
+// Directly probe GV-ASManager ASWeb door/controller .srf handlers (Door/GetList
+// .srf already returns 500 = exists). Tries GET+POST and reports status + body,
+// so the real list + open endpoints (and their params) can be read off.
+geovisionRouter.get(
+  "/probe-doors",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true);
+    const base = config.geovision.baseUrl;
+    const targets = [
+      "Door/GetList.srf", "Door/GetDoorList.srf", "Door/GetStatus.srf", "Door/GetDoorStatus.srf",
+      "Door/Open.srf", "Door/ForceOpen.srf", "Door/RemoteOpen.srf", "Door/OpenDoor.srf",
+      "Controller/GetList.srf", "Controller/GetControllerList.srf", "Controller/GetStatus.srf",
+      "GetDoorList.srf", "GetControllerList.srf", "DoorList.srf", "DoorStatus.srf",
+      "Monitor/GetList.srf", "Monitor/GetDoorList.srf", "Device/GetList.srf", "AccessControl/GetDoorList.srf",
+    ];
+    const results = [];
+    for (const t of targets) {
+      for (const method of ["GET", "POST"]) {
+        try {
+          const res = await fetch(`${base}/asweb/${t}`, {
+            method,
+            headers: { Cookie: cookie, Accept: "*/*", ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
+            body: method === "POST" ? "" : undefined,
+            redirect: "manual", signal: AbortSignal.timeout(9000),
+          });
+          const text = await res.text();
+          results.push({ path: t, method, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
+            body: text.slice(0, 500).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…") });
+        } catch (e) { results.push({ path: t, method, error: e.message }); }
+      }
+    }
+    // Interesting first: a real 200 (data) beats a 500 (exists, wrong params) beats 404.
+    results.sort((a, b) => ((a.status === 200) ? 0 : 1) - ((b.status === 200) ? 0 : 1) || (a.status ?? 999) - (b.status ?? 999));
+    return { loggedIn: true, base, results: results.slice(0, 22) };
+  })
+);
