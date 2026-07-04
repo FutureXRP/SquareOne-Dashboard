@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ShieldCheck, Mail, Lock, Loader2 } from "lucide-react";
+import { ShieldCheck, Loader2 } from "lucide-react";
 import { supabase } from "./lib/supabase.js";
 import { BrandLogo } from "./BrandLogo.jsx";
 
@@ -11,12 +11,11 @@ const C = {
 const mono = "ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace";
 const sans = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
 
+// Microsoft (Entra) is the only sign-in method. Everyone uses their work
+// M365 account; email/password and magic-link sign-in are intentionally gone.
 export function Login() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState(null); // { kind: 'err'|'ok', text }
-  const [magic, setMagic] = useState(false);
+  const [msg, setMsg] = useState(null);
 
   const signInMicrosoft = async () => {
     setBusy(true); setMsg(null);
@@ -34,27 +33,7 @@ export function Login() {
       if (error) throw error;
       // Redirects to Microsoft; the session returns via onAuthStateChange.
     } catch (err) {
-      setMsg({ kind: "err", text: err.message || "Microsoft sign-in unavailable — is it enabled in Supabase?" });
-      setBusy(false);
-    }
-  };
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setBusy(true); setMsg(null);
-    try {
-      if (magic) {
-        const { error } = await supabase.auth.signInWithOtp({ email });
-        if (error) throw error;
-        setMsg({ kind: "ok", text: "Check your email for a sign-in link." });
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        // onAuthStateChange in useAuth swaps to the app automatically.
-      }
-    } catch (err) {
-      setMsg({ kind: "err", text: err.message || "Sign-in failed." });
-    } finally {
+      setMsg(err.message || "Microsoft sign-in is unavailable right now. Try again, or contact your admin.");
       setBusy(false);
     }
   };
@@ -70,44 +49,30 @@ export function Login() {
           </div>
         </div>
 
-        <form onSubmit={submit} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 22 }}>
-          <div className="flex items-center gap-2" style={{ marginBottom: 16, color: C.text, fontWeight: 600 }}>
+        <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 22 }}>
+          <div className="flex items-center gap-2" style={{ marginBottom: 6, color: C.text, fontWeight: 600 }}>
             <ShieldCheck size={18} color={C.cyan} /> Sign in
           </div>
-
-          <Field icon={Mail} type="email" placeholder="you@company.com" value={email} onChange={setEmail} autoFocus />
-          {!magic && <Field icon={Lock} type="password" placeholder="Password" value={password} onChange={setPassword} />}
-
-          <button type="submit" disabled={busy || !email || (!magic && !password)}
-            style={{ width: "100%", marginTop: 6, padding: "11px", borderRadius: 8, border: "none", cursor: "pointer",
-              background: C.cyan, color: C.bg, fontWeight: 700, fontSize: 14, opacity: busy ? 0.7 : 1 }}>
-            {busy ? <Loader2 size={15} className="spin" /> : magic ? "Send magic link" : "Sign in"}
-          </button>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 12px", color: C.dim, fontSize: 11.5, fontFamily: mono }}>
-            <div style={{ flex: 1, height: 1, background: C.border }} /> OR <div style={{ flex: 1, height: 1, background: C.border }} />
+          <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.5, marginBottom: 18 }}>
+            Use your SquareOne Microsoft 365 work account.
           </div>
 
-          <button type="button" onClick={signInMicrosoft} disabled={busy}
-            style={{ width: "100%", padding: "11px", borderRadius: 8, border: `1px solid ${C.borderHi}`, cursor: "pointer",
-              background: C.panel2, color: C.text, fontWeight: 600, fontSize: 13.5, display: "flex", alignItems: "center", justifyContent: "center", gap: 9 }}>
-            <MicrosoftLogo /> Sign in with Microsoft
-          </button>
-
-          <button type="button" onClick={() => { setMagic((m) => !m); setMsg(null); }}
-            style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: C.mid, fontSize: 12.5, cursor: "pointer", fontFamily: mono }}>
-            {magic ? "← use password instead" : "email me a magic link instead"}
+          <button type="button" onClick={signInMicrosoft} disabled={busy} aria-label="Sign in with Microsoft"
+            style={{ width: "100%", padding: "12px", borderRadius: 8, border: "none", cursor: "pointer",
+              background: C.cyan, color: "#fff", fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 10, opacity: busy ? 0.75 : 1 }}>
+            {busy ? <Loader2 size={16} className="spin" /> : <MicrosoftLogo />}
+            {busy ? "Redirecting…" : "Sign in with Microsoft"}
           </button>
 
           {msg && (
             <div style={{ marginTop: 14, padding: "9px 12px", borderRadius: 7, fontSize: 12.5, fontFamily: mono,
-              background: C.panel2, border: `1px solid ${msg.kind === "err" ? C.red : C.go}`, color: msg.kind === "err" ? C.red : C.go }}>
-              {msg.text}
+              background: C.panel2, border: `1px solid ${C.red}`, color: C.red }}>
+              {msg}
             </div>
           )}
-        </form>
+        </div>
         <div style={{ marginTop: 14, fontSize: 11.5, color: C.dim, fontFamily: mono, textAlign: "center" }}>
-          Accounts are managed by your admin. Ask them for an invite.
+          Access is managed by your admin. Ask them to add your account.
         </div>
       </div>
       <style>{`@keyframes so-spin{to{transform:rotate(360deg)}} .spin{animation:so-spin 1s linear infinite}`}</style>
@@ -117,22 +82,11 @@ export function Login() {
 
 function MicrosoftLogo() {
   return (
-    <svg width="15" height="15" viewBox="0 0 21 21" aria-hidden="true">
-      <rect x="1" y="1" width="9" height="9" fill="#F25022" />
-      <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
-      <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
-      <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+    <svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true">
+      <rect x="1" y="1" width="9" height="9" fill="#fff" opacity="0.95" />
+      <rect x="11" y="1" width="9" height="9" fill="#fff" opacity="0.8" />
+      <rect x="1" y="11" width="9" height="9" fill="#fff" opacity="0.8" />
+      <rect x="11" y="11" width="9" height="9" fill="#fff" opacity="0.65" />
     </svg>
-  );
-}
-
-function Field({ icon: Icon, type, placeholder, value, onChange, autoFocus }) {
-  return (
-    <div className="flex items-center gap-2" style={{ marginBottom: 12, padding: "0 12px", background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8 }}>
-      <Icon size={15} color={C.dim} />
-      <input type={type} placeholder={placeholder} value={value} autoFocus={autoFocus}
-        onChange={(e) => onChange(e.target.value)}
-        style={{ flex: 1, padding: "11px 0", background: "transparent", border: "none", color: C.text, fontSize: 14, outline: "none", fontFamily: sans }} />
-    </div>
   );
 }
