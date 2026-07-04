@@ -403,6 +403,7 @@ const PROBES = [
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "amilia", label: "Amilia", path: "/api/amilia/debug/raw" },
+  { key: "auth-check", label: "Microsoft Login Check", path: "/api/admin/auth-check" },
 ];
 function Diagnostics() {
   const [busy, setBusy] = useState(null);

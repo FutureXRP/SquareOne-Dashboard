@@ -10,6 +10,55 @@ export const adminRouter = Router();
   user's visible tabs (user_prefs.tabs), and read the activity log (audit_log).
 */
 
+// GET /api/admin/auth-check — verify Microsoft (Azure) sign-in is wired without
+// requiring anyone to actually log in. Confirms the provider is enabled and that
+// Supabase's authorize step produces a valid Microsoft URL with a real tenant
+// (catches the "<tenant-id>" placeholder), then checks Microsoft accepts it.
+adminRouter.get("/auth-check", async (_req, res) => {
+  const url = process.env.SUPABASE_URL;
+  const apikey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const out = { azureEnabled: null, tenant: null, microsoft: null, notes: [] };
+  if (!url || !apikey) return res.json({ ok: true, data: { ...out, notes: ["Supabase URL/key not set on the server."] } });
+  try {
+    // 1. Which external providers are enabled?
+    const settings = await fetch(`${url}/auth/v1/settings`, { headers: { apikey } }).then((r) => r.json()).catch(() => null);
+    out.azureEnabled = settings?.external?.azure ?? null;
+
+    // 2. Ask Supabase to begin the Azure handshake; it 302s to Microsoft.
+    const authz = await fetch(`${url}/auth/v1/authorize?provider=azure`, { headers: { apikey }, redirect: "manual", signal: AbortSignal.timeout(9000) });
+    const loc = authz.headers.get("location") || "";
+    out.authorizeStatus = authz.status;
+    if (!loc) { out.notes.push("Supabase did not return a Microsoft redirect — provider may be off or misconfigured."); return res.json({ ok: true, data: out }); }
+
+    // 3. Read the tenant out of the Microsoft URL (…/login.microsoftonline.com/<tenant>/oauth2/…).
+    let mUrl; try { mUrl = new URL(loc); } catch { /* not a URL */ }
+    if (mUrl && /microsoftonline\.com$/i.test(mUrl.host)) {
+      const tenant = mUrl.pathname.split("/").filter(Boolean)[0] || "";
+      out.tenant = tenant;
+      if (!tenant || tenant.includes("<") || tenant === "tenant-id") out.notes.push("Tenant is still the placeholder — replace <tenant-id> with your Directory (tenant) ID in Supabase.");
+
+      // 4. Does Microsoft accept this tenant + client id? (No login performed.)
+      try {
+        const ms = await fetch(loc, { redirect: "manual", signal: AbortSignal.timeout(9000) });
+        const body = await ms.text();
+        const err = (body.match(/AADSTS\d+/) || [])[0];
+        out.microsoft = {
+          status: ms.status,
+          ok: !err && (ms.status === 200 || ms.status === 302),
+          error: err || undefined,
+          hint: err === "AADSTS900023" ? "Invalid tenant — fix the Azure Tenant URL."
+              : err === "AADSTS700016" ? "App/client ID not found in this tenant."
+              : err === "AADSTS50011" ? "Redirect URI mismatch — register the Supabase callback in Entra."
+              : undefined,
+        };
+      } catch (e) { out.microsoft = { error: e.message }; }
+    } else {
+      out.notes.push(`Unexpected redirect host: ${mUrl?.host || loc.slice(0, 60)}`);
+    }
+  } catch (e) { out.notes.push(`Check failed: ${e.message}`); }
+  res.json({ ok: true, data: out });
+});
+
 async function firstLocationId() {
   const { data } = await supabaseAdmin.from("locations").select("id").order("created_at").limit(1).maybeSingle();
   if (data?.id) return data.id;
