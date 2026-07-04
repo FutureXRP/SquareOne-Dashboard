@@ -23,7 +23,13 @@ export function Login() {
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "azure",
-        options: { scopes: "email openid profile", redirectTo: window.location.origin },
+        options: {
+          scopes: "email openid profile",
+          redirectTo: window.location.origin,
+          // Always show the account chooser so people pick their WORK account
+          // instead of a lingering personal Microsoft session (avoids AADSTS90072).
+          queryParams: { prompt: "select_account" },
+        },
       });
       if (error) throw error;
       // Redirects to Microsoft; the session returns via onAuthStateChange.
