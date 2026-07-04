@@ -325,24 +325,43 @@ geovisionRouter.get(
       "GetDoorList.srf", "GetControllerList.srf", "DoorList.srf", "DoorStatus.srf",
       "Monitor/GetList.srf", "Monitor/GetDoorList.srf", "Device/GetList.srf", "AccessControl/GetDoorList.srf",
     ];
+    // ExtJS always sends these; GV .srf handlers often 500 without them.
+    const ajax = { Cookie: cookie, Accept: "*/*", "X-Requested-With": "XMLHttpRequest", Referer: `${base}/asweb/ASWeb.srf` };
     const results = [];
     for (const t of targets) {
-      for (const method of ["GET", "POST"]) {
+      // GET with a door id param, and POST form with an id — the shape ASWeb uses.
+      const calls = [
+        ["GET", `?id=1`, undefined],
+        ["POST", "", "id=1"],
+        ["POST", "", "DoorId=1&ControllerId=1"],
+      ];
+      for (const [method, qs, body] of calls) {
         try {
-          const res = await fetch(`${base}/asweb/${t}`, {
-            method,
-            headers: { Cookie: cookie, Accept: "*/*", ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
-            body: method === "POST" ? "" : undefined,
-            redirect: "manual", signal: AbortSignal.timeout(9000),
+          const res = await fetch(`${base}/asweb/${t}${qs || ""}`, {
+            method, headers: { ...ajax, ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
+            body, redirect: "manual", signal: AbortSignal.timeout(9000),
           });
           const text = await res.text();
-          results.push({ path: t, method, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
-            body: text.slice(0, 500).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…") });
+          results.push({ path: t, method, sent: qs || body, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
+            body: text.slice(0, 400).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…") });
         } catch (e) { results.push({ path: t, method, error: e.message }); }
       }
     }
-    // Interesting first: a real 200 (data) beats a 500 (exists, wrong params) beats 404.
     results.sort((a, b) => ((a.status === 200) ? 0 : 1) - ((b.status === 200) ? 0 : 1) || (a.status ?? 999) - (b.status ?? 999));
-    return { loggedIn: true, base, results: results.slice(0, 22) };
+
+    // Also hunt for the mobile web app (the GV-Access phone app's cleaner API).
+    const mobile = [];
+    for (const mp of ["/asweb/m/", "/asweb/mobile/", "/asweb/M/", "/asweb/Mobile/"]) {
+      try {
+        const res = await gvGet(mp, cookie);
+        const text = await res.text();
+        if (res.status !== 404) {
+          const scripts = [...new Set([...text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]))].slice(0, 12);
+          mobile.push({ path: mp, status: res.status, len: text.length, scripts, raw: text.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…").slice(0, 500) });
+        }
+      } catch (e) { mobile.push({ path: mp, error: e.message }); }
+    }
+
+    return { loggedIn: true, base, results: results.slice(0, 20), mobile };
   })
 );
