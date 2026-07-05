@@ -1347,7 +1347,7 @@ function CameraTile({ c, snapshotUrl, liveEnabled, arranging, isHidden, onLive, 
         style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default", opacity: arranging && isHidden ? 0.4 : 1 }}>
         <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
           display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
-          <Snapshot path={snap} name={c.name} online={c.online} encrypted={c.encrypted} />
+          <Snapshot path={snap} name={c.name} online={c.online} encrypted={c.encrypted} camId={c.id} liveEnabled={liveEnabled} />
           {c.recording && !arranging && (
             <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
               <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
@@ -1676,10 +1676,59 @@ function AccountChip({ user, role, onSignOut }) {
   );
 }
 
+// Limit concurrent live-frame grabs so we don't spin up many HLS streams at once.
+let posterActive = 0;
+const posterQueue = [];
+function runPoster(task) {
+  return new Promise((resolve, reject) => {
+    const start = () => {
+      posterActive++;
+      task().then(resolve, reject).finally(() => { posterActive--; const n = posterQueue.shift(); if (n) n(); });
+    };
+    if (posterActive < 3) start(); else posterQueue.push(start);
+  });
+}
+
+// Grab a single frame from a camera's live HLS stream as a JPEG data URL. Uses
+// hls.js (MSE) rather than native HLS so the canvas isn't cross-origin tainted.
+async function grabLiveFrame(camId) {
+  const r = await apiFetch(`/api/hik/cameras/${camId}/live`).then((res) => res.json());
+  const url = r?.data?.url;
+  if (!url) throw new Error("no live url");
+  const { default: Hls } = await import("hls.js");
+  if (!Hls.isSupported()) throw new Error("hls unsupported");
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.muted = true; video.playsInline = true;
+    const hls = new Hls({ maxBufferLength: 4 });
+    let done = false;
+    const cleanup = () => { clearTimeout(timer); try { hls.destroy(); } catch { /* ignore */ } };
+    const capture = () => {
+      if (done || !video.videoWidth) return;
+      done = true;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        const data = canvas.toDataURL("image/jpeg", 0.7);
+        cleanup(); resolve(data);
+      } catch (e) { cleanup(); reject(e); }
+    };
+    video.addEventListener("loadeddata", capture);
+    video.addEventListener("timeupdate", capture);
+    hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal && !done) { done = true; cleanup(); reject(new Error(d.details)); } });
+    hls.loadSource(url); hls.attachMedia(video);
+    video.play?.().catch(() => {});
+    const timer = setTimeout(() => { if (!done) { done = true; cleanup(); reject(new Error("timeout")); } }, 18000);
+  });
+}
+
 // Camera snapshot loaded through the authed fetch (an <img> can't send the JWT),
-// turned into an object URL. Falls back to a placeholder when no path / on error.
-function Snapshot({ path, name, online, encrypted }) {
+// turned into an object URL. When the still-image capture fails but the camera
+// streams (common for NVR channels), fall back to a frame grabbed from live.
+function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
   const [src, setSrc] = useState(null);
+  const [poster, setPoster] = useState(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (!path) return;
@@ -1697,7 +1746,17 @@ function Snapshot({ path, name, online, encrypted }) {
     return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
   }, [path]);
 
+  // Poster-from-live fallback: snapshot failed but the camera is live-capable.
+  const tryPoster = (online && liveEnabled && camId) && (failed || !path);
+  useEffect(() => {
+    if (!tryPoster || src || poster) return;
+    let cancelled = false;
+    runPoster(() => grabLiveFrame(camId)).then((d) => { if (!cancelled) setPoster(d); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tryPoster, src, poster, camId]);
+
   if (src) return <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
+  if (poster) return <img src={poster} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
   // The tile behind this is a dark video surface, so use light-on-dark colors
   // regardless of the (light) app theme.
   // Encrypted cameras can't be shown until their verification code is provided,
@@ -1708,6 +1767,7 @@ function Snapshot({ path, name, online, encrypted }) {
       {encLocked ? <Lock size={20} color="#E8A33E" /> : <Video size={22} color={online ? "#7C8A9C" : C.red} />}
       {!online ? "camera offline"
         : encLocked ? "encrypted — needs code"
+        : tryPoster && !poster ? "loading…"
         : failed ? "snapshot unavailable"
         : path ? "loading…" : "feed via Hik-Connect"}
     </div>
