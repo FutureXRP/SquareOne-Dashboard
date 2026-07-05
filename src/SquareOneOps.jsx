@@ -402,6 +402,7 @@ const PROBES = [
   { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
+  { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },
   { key: "amilia", label: "Amilia", path: "/api/amilia/debug/raw" },
   { key: "auth-check", label: "Microsoft Login Check", path: "/api/admin/auth-check" },
 ];
@@ -1729,6 +1730,7 @@ async function grabLiveFrame(camId) {
 function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
   const [src, setSrc] = useState(null);
   const [poster, setPoster] = useState(null);
+  const [posterFailed, setPosterFailed] = useState(false);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (!path) return;
@@ -1749,11 +1751,13 @@ function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
   // Poster-from-live fallback: snapshot failed but the camera is live-capable.
   const tryPoster = (online && liveEnabled && camId) && (failed || !path);
   useEffect(() => {
-    if (!tryPoster || src || poster) return;
+    if (!tryPoster || src || poster || posterFailed) return;
     let cancelled = false;
-    runPoster(() => grabLiveFrame(camId)).then((d) => { if (!cancelled) setPoster(d); }).catch(() => {});
+    runPoster(() => grabLiveFrame(camId))
+      .then((d) => { if (!cancelled) setPoster(d); })
+      .catch(() => { if (!cancelled) setPosterFailed(true); }); // don't spin forever
     return () => { cancelled = true; };
-  }, [tryPoster, src, poster, camId]);
+  }, [tryPoster, src, poster, posterFailed, camId]);
 
   if (src) return <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
   if (poster) return <img src={poster} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
@@ -1767,8 +1771,8 @@ function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
       {encLocked ? <Lock size={20} color="#E8A33E" /> : <Video size={22} color={online ? "#7C8A9C" : C.red} />}
       {!online ? "camera offline"
         : encLocked ? "encrypted — needs code"
-        : tryPoster && !poster ? "loading…"
-        : failed ? "snapshot unavailable"
+        : tryPoster && !poster && !posterFailed ? "loading…"
+        : failed || posterFailed ? "snapshot unavailable"
         : path ? "loading…" : "feed via Hik-Connect"}
     </div>
   );
