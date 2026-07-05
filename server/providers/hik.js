@@ -216,6 +216,44 @@ hikRouter.get(
   })
 );
 
+// Per-camera diagnostics: for the first few cameras (or ?id=serial_ch), report
+// exactly what capture and live-address return, so we can see why NVR-channel
+// thumbnails fail and whether live works. Admin-only.
+hikRouter.get(
+  "/debug/camera",
+  requireAdmin,
+  guard("hik", async (req) => {
+    const { accessToken, areaDomain } = await getToken();
+    const call = async (path, params) => {
+      try {
+        const body = await http(`${areaDomain}${path}`, {
+          method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: form(params),
+        });
+        return { code: body?.code, msg: body?.msg, data: body?.data };
+      } catch (e) { return { error: e.message }; }
+    };
+    let ids = req.query.id ? [req.query.id] : null;
+    if (!ids) {
+      // Default: sample a few cameras from the list (mix of any NVR channels).
+      const cams = await listAll("/api/lapp/camera/list", accessToken, areaDomain);
+      ids = cams.slice(0, 4).map((c) => camId(c.deviceSerial, c.channelNo));
+    }
+    const results = [];
+    for (const id of ids) {
+      const { deviceSerial, channelNo } = parseCamId(id);
+      const capture = await call("/api/lapp/device/capture", { accessToken, deviceSerial, channelNo, code: codeFor(deviceSerial) });
+      const live = await call("/api/lapp/live/address/get", { accessToken, deviceSerial, channelNo, protocol: 2, quality: 1, code: codeFor(deviceSerial) });
+      results.push({
+        id, deviceSerial, channelNo,
+        capture: { code: capture.code, msg: capture.msg, hasPic: Boolean(capture.data?.picUrl), error: capture.error },
+        live: { code: live.code, msg: live.msg, hasUrl: Boolean(live.data?.url), urlHead: live.data?.url ? String(live.data.url).slice(0, 40) : null, error: live.error },
+      });
+    }
+    return { results };
+  })
+);
+
 /*
   Admin-only diagnostics. Forces a fresh token (reports which regional host and
   areaDomain worked) and lists devices. Never returns appKey/appSecret. Use this
