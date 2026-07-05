@@ -1260,13 +1260,16 @@ function Cameras({ cameras, snapshotUrl, liveEnabled, layout = {}, onLayout }) {
     save({ hidden: [...h] });
   };
   const reset = () => onLayout?.({ size: 8, order: [], hidden: [] });
+  const encryptedCount = cameras.filter((c) => c.encrypted && c.online).length;
 
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Cameras" value={cameras.length} icon={Video} color={C.cyan} />
         <Stat label="Online" value={online} icon={Wifi} color={online === cameras.length ? C.go : C.amber} />
-        <Stat label="Recording" value={cameras.filter((c) => c.recording).length} icon={Activity} color={C.go} />
+        {encryptedCount > 0
+          ? <Stat label="Encrypted" value={encryptedCount} sub="need codes" icon={Lock} color={C.amber} />
+          : <Stat label="Recording" value={cameras.filter((c) => c.recording).length} icon={Activity} color={C.go} />}
       </div>
 
       {/* Wall toolbar: grid size, arrange toggle, paging */}
@@ -1344,7 +1347,7 @@ function CameraTile({ c, snapshotUrl, liveEnabled, arranging, isHidden, onLive, 
         style={{ all: "unset", display: "block", width: "100%", cursor: canLive ? "pointer" : "default", opacity: arranging && isHidden ? 0.4 : 1 }}>
         <div style={{ aspectRatio: "16/9", background: "#05080B", borderRadius: 7, border: `1px solid ${C.border}`,
           display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
-          <Snapshot path={snap} name={c.name} online={c.online} />
+          <Snapshot path={snap} name={c.name} online={c.online} encrypted={c.encrypted} />
           {c.recording && !arranging && (
             <span className="pulse" style={{ position: "absolute", top: 8, left: 8, display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: mono, color: C.red }}>
               <span style={{ width: 7, height: 7, borderRadius: 99, background: C.red }} />REC
@@ -1675,7 +1678,7 @@ function AccountChip({ user, role, onSignOut }) {
 
 // Camera snapshot loaded through the authed fetch (an <img> can't send the JWT),
 // turned into an object URL. Falls back to a placeholder when no path / on error.
-function Snapshot({ path, name, online }) {
+function Snapshot({ path, name, online, encrypted }) {
   const [src, setSrc] = useState(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -1697,10 +1700,16 @@ function Snapshot({ path, name, online }) {
   if (src) return <img src={src} alt={name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />;
   // The tile behind this is a dark video surface, so use light-on-dark colors
   // regardless of the (light) app theme.
+  // Encrypted cameras can't be shown until their verification code is provided,
+  // so label them clearly instead of a generic "unavailable".
+  const encLocked = online && failed && encrypted;
   return (
-    <div className="flex flex-col items-center gap-1" style={{ color: "#7C8A9C", fontFamily: mono, fontSize: 12 }}>
-      <Video size={22} color={online ? "#7C8A9C" : C.red} />
-      {!online ? "camera offline" : failed ? "snapshot unavailable" : path ? "loading…" : "feed via Hik-Connect"}
+    <div className="flex flex-col items-center gap-1" style={{ color: encLocked ? "#E8A33E" : "#7C8A9C", fontFamily: mono, fontSize: 12, textAlign: "center", padding: 8 }}>
+      {encLocked ? <Lock size={20} color="#E8A33E" /> : <Video size={22} color={online ? "#7C8A9C" : C.red} />}
+      {!online ? "camera offline"
+        : encLocked ? "encrypted — needs code"
+        : failed ? "snapshot unavailable"
+        : path ? "loading…" : "feed via Hik-Connect"}
     </div>
   );
 }
