@@ -1700,10 +1700,14 @@ async function grabLiveFrame(camId) {
   if (!Hls.isSupported()) throw new Error("hls unsupported");
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
-    video.muted = true; video.playsInline = true;
+    video.muted = true; video.playsInline = true; video.autoplay = true;
+    // Must be attached to the DOM (offscreen) or many browsers never decode
+    // frames from it — which is why the grab silently failed before.
+    video.style.cssText = "position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;left:-10px;top:-10px";
+    document.body.appendChild(video);
     const hls = new Hls({ maxBufferLength: 4 });
     let done = false;
-    const cleanup = () => { clearTimeout(timer); try { hls.destroy(); } catch { /* ignore */ } };
+    const cleanup = () => { clearTimeout(timer); try { hls.destroy(); } catch { /* ignore */ } try { video.remove(); } catch { /* ignore */ } };
     const capture = () => {
       if (done || !video.videoWidth) return;
       done = true;
@@ -1716,11 +1720,12 @@ async function grabLiveFrame(camId) {
       } catch (e) { cleanup(); reject(e); }
     };
     video.addEventListener("loadeddata", capture);
+    video.addEventListener("canplay", capture);
     video.addEventListener("timeupdate", capture);
     hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal && !done) { done = true; cleanup(); reject(new Error(d.details)); } });
     hls.loadSource(url); hls.attachMedia(video);
-    video.play?.().catch(() => {});
-    const timer = setTimeout(() => { if (!done) { done = true; cleanup(); reject(new Error("timeout")); } }, 18000);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => video.play?.().catch(() => {}));
+    const timer = setTimeout(() => { if (!done) { done = true; cleanup(); reject(new Error("timeout")); } }, 16000);
   });
 }
 
