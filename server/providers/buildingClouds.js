@@ -842,6 +842,42 @@ geovisionRouter.get(
   })
 );
 
+// The client_guid comes from ServerConnector.getClientGUID(). Dump ServerConnector.js
+// and show getClientGUID (the connect call that mints the guid) + addNotifications
+// (the subscription) so the exact register request can be replicated.
+geovisionRouter.get(
+  "/serverconn",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true);
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (p) => { const r = await gvGet(p, cookie); return { path: p, status: r.status, text: await r.text() }; };
+
+    // baseUrl is /ASWeb/ (modules/... resolves there), so "ServerConnector" -> /ASWeb/ServerConnector.js.
+    let file = null;
+    for (const p of ["/ASWeb/ServerConnector.js", "/ASWeb/main/ServerConnector.js", "/ASWeb/js/ServerConnector.js", "/ASWeb/lib/ServerConnector.js"]) {
+      const r = await get(p); if (r.status === 200 && r.text.length > 100) { file = r; break; }
+    }
+    if (!file) return { found: false, tried: "ServerConnector.js in /ASWeb/, /ASWeb/main/, /ASWeb/js/, /ASWeb/lib/" };
+
+    const t = file.text;
+    const uniq = (a) => [...new Set(a)];
+    const actions = uniq([...t.matchAll(/action\s*:\s*["']([A-Za-z0-9_]+)["']/g)].map((m) => m[1])).sort();
+    const urls = uniq([...t.matchAll(/["'`]([\w./?=&-]*\.srf[\w./?=&-]*)["'`]/g)].map((m) => m[1]));
+    const ctxOf = (re, span = 500, max = 3) => {
+      const out = []; let m; const g = new RegExp(re, "gi");
+      while ((m = g.exec(t)) && out.length < max) out.push(redact(t.slice(Math.max(0, m.index - span), m.index + span)));
+      return out;
+    };
+    return {
+      found: true, path: file.path, len: t.length, actions, urls,
+      getClientGUIDCtx: ctxOf("getClientGUID"),
+      addNotificationsCtx: ctxOf("addNotifications"),
+      guidGenCtx: ctxOf("(?:S4|uuid|GUID|guid)\\s*[=:(]", 320, 4),
+    };
+  })
+);
+
 // Read the Monitor event log — every door open/close/grant records the door's
 // controller id, door id, and NAME here, which is how we map ids -> names when
 // the controller-list actions come back empty.
