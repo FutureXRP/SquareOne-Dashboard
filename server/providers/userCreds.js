@@ -1,9 +1,70 @@
 import { Router } from "express";
-import { requireAuth, supabaseAdmin, authEnabled, logAudit } from "../auth.js";
+import { requireAuth, supabaseAdmin, authEnabled, logAudit, firstLocationId, ADMIN_EMAILS } from "../auth.js";
 import { encrypt, decrypt, cryptoReady } from "../crypto.js";
 import { config } from "../config.js";
 
 export const meRouter = Router();
+
+// POST /api/me/provision — resolve the signed-in user's access, called right
+// after Microsoft sign-in. Access is invite-only:
+//   1. Already has a role (user_locations) -> return it.
+//   2. Email is in ADMIN_EMAILS -> ensure an admin grant (owner bootstrap).
+//   3. Email matches an invite -> grant that role + optional tab override, and
+//      consume the invite.
+//   4. Otherwise -> no access (uninvited).
+// Also returns the role-based tab buckets so the client can render the sidebar.
+meRouter.post("/provision", requireAuth, async (req, res) => {
+  if (!authEnabled || !req.user) return res.json({ ok: true, data: { role: null, status: "open", roleTabs: {} } });
+  const email = (req.user.email || "").toLowerCase();
+  try {
+    const roleTabs = await getRoleTabs();
+    const grant = async (role) => {
+      const loc = await firstLocationId();
+      await supabaseAdmin.from("user_locations").upsert(
+        { user_id: req.user.id, location_id: loc, role }, { onConflict: "user_id,location_id" });
+      return role;
+    };
+
+    // 1. Existing grants.
+    const { data: locs } = await supabaseAdmin.from("user_locations").select("role").eq("user_id", req.user.id);
+    let role = (locs || []).some((r) => r.role === "admin") ? "admin"
+      : (locs || []).some((r) => r.role === "manager") ? "manager"
+      : (locs || []).length ? "staff" : null;
+
+    // 2. Owner bootstrap.
+    if (ADMIN_EMAILS.has(email) && role !== "admin") { await grant("admin"); role = "admin"; }
+
+    // 3. Claim an invite.
+    if (!role && email) {
+      const { data: inv } = await supabaseAdmin.from("invites").select("role, tabs").eq("email", email).maybeSingle();
+      if (inv) {
+        await grant(inv.role);
+        if (inv.tabs && typeof inv.tabs === "object") {
+          const { data: pref } = await supabaseAdmin.from("user_prefs").select("prefs").eq("user_id", req.user.id).maybeSingle();
+          await supabaseAdmin.from("user_prefs").upsert(
+            { user_id: req.user.id, prefs: { ...(pref?.prefs || {}), tabs: inv.tabs }, updated_at: new Date().toISOString() },
+            { onConflict: "user_id" });
+        }
+        await supabaseAdmin.from("invites").delete().eq("email", email);
+        await logAudit(req, "auth.provision", email, { role: inv.role });
+        role = inv.role;
+      }
+    }
+
+    res.json({ ok: true, data: { role, status: role ? "active" : "no-access", roleTabs } });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// Role-based tab buckets from app_settings ('role_tabs'). Shape:
+// { manager: { members:false, ... }, staff: { ... } }.
+export async function getRoleTabs() {
+  try {
+    const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "role_tabs").maybeSingle();
+    return data?.value || {};
+  } catch { return {}; }
+}
 
 /*
   Per-user vendor credentials, so alarm/door/camera actions are attributed to

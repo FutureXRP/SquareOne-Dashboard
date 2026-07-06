@@ -15,6 +15,8 @@ const recordActivity = (event) =>
 export function useAuth() {
   const [session, setSession] = useState(null);
   const [role, setRole] = useState(null);
+  const [status, setStatus] = useState(null);   // "active" | "no-access" | "open"
+  const [roleTabs, setRoleTabs] = useState({}); // role-based tab buckets
   const [loading, setLoading] = useState(supabaseEnabled);
 
   useEffect(() => {
@@ -34,15 +36,22 @@ export function useAuth() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Pull the user's role (highest grant across locations). RLS scopes the rows.
+  // Resolve access on sign-in. The server claims any invite for this email,
+  // applies the owner bootstrap, and returns the role + status + role buckets.
+  // Invite-only: an uninvited Microsoft account comes back status "no-access".
   useEffect(() => {
-    if (!supabaseEnabled || !session) { setRole(null); return; }
+    if (!supabaseEnabled || !session) { setRole(null); setStatus(null); return; }
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from("user_locations").select("role");
-      if (cancelled) return;
-      const roles = (data || []).map((r) => r.role);
-      setRole(roles.includes("admin") ? "admin" : roles.includes("manager") ? "manager" : "staff");
+      try {
+        const r = await apiFetch("/api/me/provision", { method: "POST" }).then((res) => res.json());
+        if (cancelled) return;
+        setRole(r?.data?.role ?? null);
+        setStatus(r?.data?.status ?? "no-access");
+        setRoleTabs(r?.data?.roleTabs ?? {});
+      } catch {
+        if (!cancelled) { setRole(null); setStatus("no-access"); }
+      }
     })();
     return () => { cancelled = true; };
   }, [session]);
@@ -61,6 +70,10 @@ export function useAuth() {
     session,
     user: session?.user ?? null,
     role,
+    status,
+    roleTabs,
+    // Authenticated with Microsoft but not authorized (no invite / no role).
+    noAccess: supabaseEnabled && Boolean(session) && status === "no-access",
     loading,
     signOut,
   };

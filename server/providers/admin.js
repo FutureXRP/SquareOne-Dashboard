@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { supabaseAdmin, logAudit } from "../auth.js";
+import { supabaseAdmin, logAudit, firstLocationId } from "../auth.js";
+import { getRoleTabs } from "./userCreds.js";
 
 export const adminRouter = Router();
 
@@ -59,46 +60,78 @@ adminRouter.get("/auth-check", async (_req, res) => {
   res.json({ ok: true, data: out });
 });
 
-async function firstLocationId() {
-  const { data } = await supabaseAdmin.from("locations").select("id").order("created_at").limit(1).maybeSingle();
-  if (data?.id) return data.id;
-  const { data: made } = await supabaseAdmin.from("locations").insert({ name: "SquareOne Compassion" }).select("id").single();
-  return made.id;
-}
-
-// GET /api/admin/users — everyone, with role, visible-tabs, and last sign-in.
+// GET /api/admin/users — the whole team picture: active users (with role, tabs,
+// last sign-in), pending invites (authorized but not yet signed in), and the
+// role-based tab buckets. Everyone signs in with Microsoft, so there's no
+// account creation here — only authorization.
 adminRouter.get("/users", async (_req, res) => {
   try {
     const { data: list, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 200 });
     if (error) throw error;
     const users = list.users;
     const ids = users.map((u) => u.id);
-    const [{ data: locs }, { data: prefs }] = await Promise.all([
+    const [{ data: locs }, { data: prefs }, { data: invites }, roleTabs] = await Promise.all([
       supabaseAdmin.from("user_locations").select("user_id, role").in("user_id", ids),
       supabaseAdmin.from("user_prefs").select("user_id, prefs").in("user_id", ids),
+      supabaseAdmin.from("invites").select("email, role, created_at").order("created_at", { ascending: false }),
+      getRoleTabs(),
     ]);
     const roleBy = new Map();
     (locs || []).forEach((r) => { const cur = roleBy.get(r.user_id); if (cur !== "admin") roleBy.set(r.user_id, r.role); });
     const prefBy = new Map((prefs || []).map((p) => [p.user_id, p.prefs || {}]));
-    res.json({ ok: true, data: users.map((u) => ({
-      id: u.id, email: u.email, role: roleBy.get(u.id) || null,
-      lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null,
-    })) });
+    // Only surface users who actually have access (a role) — auth.users may hold
+    // stragglers who signed in before invite-only or were never authorized.
+    const activeUsers = users
+      .filter((u) => roleBy.has(u.id))
+      .map((u) => ({ id: u.id, email: u.email, role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
+    res.json({ ok: true, data: { users: activeUsers, invites: invites || [], roleTabs } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
-// POST /api/admin/users { email, password, role } — create a login.
-adminRouter.post("/users", async (req, res) => {
-  const { email, password, role = "staff" } = req.body || {};
-  if (!email || !password) return res.status(400).json({ ok: false, message: "Email and password are both required." });
-  if (String(password).length < 8) return res.status(400).json({ ok: false, message: "Password must be at least 8 characters." });
+// POST /api/admin/invites { email, role } — authorize a Microsoft account. When
+// that person next signs in, they're granted this role automatically.
+adminRouter.post("/invites", async (req, res) => {
+  const email = String((req.body && req.body.email) || "").trim().toLowerCase();
+  const role = (req.body && req.body.role) || "staff";
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "A valid email is required." });
+  if (!["staff", "manager", "admin"].includes(role)) return res.status(400).json({ ok: false, message: "Invalid role." });
   try {
-    const { data, error } = await supabaseAdmin.auth.admin.createUser({ email, password, email_confirm: true });
-    if (error) throw error;
-    const loc = await firstLocationId();
-    await supabaseAdmin.from("user_locations").upsert({ user_id: data.user.id, location_id: loc, role }, { onConflict: "user_id,location_id" });
-    logAudit(req, "admin.create-user", data.user.id, { email, role });
-    res.json({ ok: true, data: { id: data.user.id, email } });
+    // If they've already signed in, just set the role directly instead.
+    const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 200 });
+    const existing = (list?.users || []).find((u) => (u.email || "").toLowerCase() === email);
+    if (existing) {
+      const loc = await firstLocationId();
+      await supabaseAdmin.from("user_locations").upsert({ user_id: existing.id, location_id: loc, role }, { onConflict: "user_id,location_id" });
+      logAudit(req, "admin.set-role", existing.id, { email, role });
+      return res.json({ ok: true, data: { email, role, status: "active" } });
+    }
+    await supabaseAdmin.from("invites").upsert({ email, role, invited_by: req.user.id }, { onConflict: "email" });
+    logAudit(req, "admin.invite", email, { role });
+    res.json({ ok: true, data: { email, role, status: "invited" } });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// DELETE /api/admin/invites/:email — cancel a pending invite.
+adminRouter.delete("/invites/:email", async (req, res) => {
+  try {
+    const email = String(req.params.email || "").toLowerCase();
+    await supabaseAdmin.from("invites").delete().eq("email", email);
+    logAudit(req, "admin.invite-cancel", email, {});
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// GET/PUT /api/admin/role-tabs — the role-based tab buckets (manager/staff).
+adminRouter.put("/role-tabs", async (req, res) => {
+  const role = (req.body && req.body.role) || "";
+  const tabs = (req.body && req.body.tabs) || {};
+  if (!["manager", "staff"].includes(role)) return res.status(400).json({ ok: false, message: "Role must be manager or staff." });
+  try {
+    const current = await getRoleTabs();
+    const value = { ...current, [role]: tabs };
+    await supabaseAdmin.from("app_settings").upsert({ key: "role_tabs", value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+    logAudit(req, "admin.role-tabs", role, { tabs });
+    res.json({ ok: true, data: value });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
