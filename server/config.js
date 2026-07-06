@@ -46,6 +46,10 @@ function parseFeeOverrides(raw) {
 export const config = {
   port: Number(process.env.PORT || 8787),
 
+  // Display timezone for dates/times (bookings, hours). The server runs in UTC on
+  // Vercel, so times must be formatted in the org's local zone. Tulsa = Central.
+  timezone: process.env.ORG_TIMEZONE || "America/Chicago",
+
   amilia: {
     // SmartRec V3. Auth = Basic(email:password) -> JWT (valid ~1 year), then Bearer.
     // Org is in the URL path (numeric id or slug). Language is a required path segment.
