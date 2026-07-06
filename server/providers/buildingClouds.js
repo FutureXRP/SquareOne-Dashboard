@@ -804,6 +804,44 @@ geovisionRouter.get(
   })
 );
 
+// Deep-scan LiveLog.js (the live-monitor module) for the CLIENT_GUID origin:
+// GET_ALL_DEVICES uses an already-registered guid, so an earlier connect/register
+// action mints it. Dump every action:/module: value it uses and the code around
+// setClientGUID + guid creation so that first call can be identified.
+geovisionRouter.get(
+  "/livelog",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true);
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const r = await gvGet("/ASWeb/modules/LiveLog/LiveLog.js", cookie);
+    const t = await r.text();
+    if (r.status !== 200 || t.length < 100) return { status: r.status, len: t.length };
+
+    const uniq = (a) => [...new Set(a)];
+    const actions = uniq([...t.matchAll(/action\s*:\s*["']([A-Z0-9_]+)["']/g)].map((m) => m[1])).sort();
+    const modules = uniq([...t.matchAll(/module\s*:\s*["']([a-z0-9_]+)["']/gi)].map((m) => m[1]));
+    const deps = (t.match(/define\(\s*\[([^\]]*)\]/) || [])[1];
+
+    // Code windows around the guid lifecycle: where it's set, and where it's
+    // first created/fetched (setClientGUID / getClientGUID / newGUID / uuid /
+    // CONNECT / REGISTER / GET_CLIENT). Also the getAllDevices/doorOperation area.
+    const ctxOf = (re, span = 420, max = 4) => {
+      const out = []; let m;
+      const g = new RegExp(re, "gi");
+      while ((m = g.exec(t)) && out.length < max) out.push(redact(t.slice(Math.max(0, m.index - span), m.index + span)));
+      return out;
+    };
+    return {
+      status: r.status, len: t.length, depsRaw: deps?.replace(/\s+/g, " ").slice(0, 500),
+      actions, modules,
+      setClientGuidCtx: ctxOf("setClientGUID"),
+      guidOriginCtx: ctxOf("(?:new\\s*GUID|newGuid|createGUID|genGUID|generateGUID|getClientGUID|GET_CLIENT_GUID|\\bCONNECT\\b|REGISTER|MONITOR_LOGIN|initMonitor|startMonitor)"),
+      clientGuidCtx: ctxOf("client_guid", 300, 6),
+    };
+  })
+);
+
 // Read the Monitor event log — every door open/close/grant records the door's
 // controller id, door id, and NAME here, which is how we map ids -> names when
 // the controller-list actions come back empty.
