@@ -992,10 +992,23 @@ function Security({ doors, alarm, hub, lockdown }) {
 // attributed to the signed-in operator. Momentary unlock is how GeoVision access
 // control works, so a door "unlock" pulses the strike open — there's no held
 // lock/unlock state to reflect, just the last action.
+// The full GeoVision door-operation set, matching the GV-Access phone app's
+// door menu. Confirmed operation constants from the app's own code. "unlock" is
+// the momentary buzz-open everyone uses; the rest are held states, so the
+// forceful ones (force-lock, lockdown) confirm before firing.
+const GV_DOOR_ACTIONS = [
+  { key: "unlock", label: "Unlock", icon: Unlock, color: C.cyan, blurb: "Buzz open for a moment" },
+  { key: "force-unlock", label: "Force Unlock", icon: Unlock, color: C.amber, blurb: "Hold open until released", confirm: true },
+  { key: "force-lock", label: "Force Lock", icon: Lock, color: C.amber, blurb: "Hold locked — no card access", confirm: true },
+  { key: "release", label: "Release", icon: Check, color: C.go, blurb: "Return to normal schedule" },
+  { key: "lockdown", label: "Lock Down", icon: ShieldAlert, color: C.red, blurb: "Emergency lockdown", confirm: true },
+];
+
 function GeoVisionDoors() {
-  const [doors, setDoors] = useState(null);   // null = loading, [] = none configured
+  const [doors, setDoors] = useState(null);   // null = loading, [] = couldn't reach controller
   const [busy, setBusy] = useState(null);
-  const [result, setResult] = useState({});   // door key -> {ok, at}
+  const [result, setResult] = useState({});   // door key -> {ok, msg}
+  const [openKey, setOpenKey] = useState(null); // which door's extra actions are expanded
 
   useEffect(() => {
     apiFetch("/api/geovision/doors").then((r) => r.json())
@@ -1003,18 +1016,19 @@ function GeoVisionDoors() {
       .catch(() => setDoors([]));
   }, []);
 
-  const send = async (d, op) => {
+  const send = async (d, act) => {
+    if (act.confirm && !window.confirm(`${act.label} — ${d.name}?\n\n${act.blurb}. This stays in effect until you Release the door.`)) return;
     const key = `${d.ctrl}/${d.door}`;
-    setBusy(`${key}:${op}`);
+    setBusy(`${key}:${act.key}`);
     try {
-      const r = await apiFetch(`/api/geovision/doors/${op}`, {
+      const r = await apiFetch(`/api/geovision/doors/${act.key}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ctrl: d.ctrl, door: d.door }),
       }).then((res) => res.json());
       const ok = r.ok && r.data?.ok;
-      setResult((s) => ({ ...s, [key]: { ok, op, msg: ok ? `${op === "unlock" ? "Unlocked" : "Locked"} just now` : (r.message || r.data?.response || "Command failed") } }));
+      setResult((s) => ({ ...s, [key]: { ok, msg: ok ? `${act.label} sent just now` : (r.message || r.data?.response || "Command failed") } }));
     } catch (e) {
-      setResult((s) => ({ ...s, [key]: { ok: false, op, msg: e.message } }));
+      setResult((s) => ({ ...s, [key]: { ok: false, msg: e.message } }));
     } finally { setBusy(null); }
   };
 
@@ -1027,9 +1041,26 @@ function GeoVisionDoors() {
     (m[g] = m[g] || []).push(d); return m;
   }, {});
 
+  const primary = GV_DOOR_ACTIONS[0];              // Unlock — the one-tap common action
+  const extras = GV_DOOR_ACTIONS.slice(1);         // the held-state actions, behind "More"
+
+  const ActBtn = (d, act, wide) => {
+    const key = `${d.ctrl}/${d.door}`;
+    const Icon = act.icon;
+    return (
+      <button key={act.key} onClick={() => send(d, act)} disabled={busy} title={act.blurb}
+        className="so-btn flex items-center gap-1.5"
+        style={{ padding: "6px 14px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, minWidth: wide ? 92 : 0,
+          color: act.color, borderColor: act.key === "unlock" ? act.color : C.border }}>
+        {busy === `${key}:${act.key}` ? <Loader2 size={13} className="spin" /> : <Icon size={13} />} {act.label}
+      </button>
+    );
+  };
+
   const DoorRow = (d) => {
     const key = `${d.ctrl}/${d.door}`;
     const res = result[key];
+    const open = openKey === key;
     return (
       <div key={key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
         <div className="flex items-center justify-between" style={{ gap: 10 }}>
@@ -1037,16 +1068,18 @@ function GeoVisionDoors() {
             <DoorOpen size={15} color={C.cyan} />{d.name}
           </span>
           <div className="flex items-center gap-2">
-            <button onClick={() => send(d, "unlock")} disabled={busy} className="so-btn flex items-center gap-1.5"
-              style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 92, color: C.cyan, borderColor: C.cyan }}>
-              {busy === `${key}:unlock` ? <Loader2 size={13} className="spin" /> : <Unlock size={13} />} Unlock
-            </button>
-            <button onClick={() => send(d, "lock")} disabled={busy} className="so-btn flex items-center gap-1.5"
-              style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 80, color: C.go, borderColor: C.border }}>
-              {busy === `${key}:lock` ? <Loader2 size={13} className="spin" /> : <Lock size={13} />} Lock
+            {ActBtn(d, primary, true)}
+            <button onClick={() => setOpenKey(open ? null : key)} className="so-btn flex items-center gap-1"
+              style={{ padding: "6px 10px", borderRadius: 6, fontSize: 12.5, fontWeight: 600, color: C.mid, borderColor: C.border }}>
+              More <ChevronDown size={13} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
             </button>
           </div>
         </div>
+        {open && (
+          <div className="flex items-center" style={{ gap: 8, flexWrap: "wrap", marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.border}` }}>
+            {extras.map((act) => ActBtn(d, act))}
+          </div>
+        )}
         {res && (
           <div style={{ marginTop: 6, fontSize: 12, fontFamily: mono, color: res.ok ? C.go : C.red }}>
             {res.ok ? "✓ " : "✕ "}{res.msg}
