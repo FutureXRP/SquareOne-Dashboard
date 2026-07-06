@@ -387,6 +387,55 @@ napcoRouter.get(
   })
 );
 
+// Admin: dump the arm/disarm command-building JavaScript from the panel page
+// (Security.aspx) + NapcoSite.js. The commands are built dynamically (CommandText
+// = a variable), so we surface the function names + the code windows around
+// DSS/CommandText/Send/arm/Params to read how arm/disarm/status are constructed.
+napcoRouter.get(
+  "/panel-js",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    if (!login.ok) return { loggedIn: false, status: login.status };
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try { const r = await fetch(`${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) }); return { status: r.status, text: await r.text() }; }
+      catch (e) { return { error: e.message }; }
+    };
+    // Pull every code window around the interesting tokens (dynamic or literal).
+    const windows = (txt, max = 8) => {
+      const out = []; const seen = new Set();
+      const re = /(DSS\.aspx|CommandText|function\s+\w*[Ss]end\w*|function\s+\w*[Aa]rm\w*|disarm|\barm\b|keypad|Params\s*[=+]|panelStatus|GetStatus|SendCommand)/g;
+      let m;
+      while ((m = re.exec(txt)) && out.length < max) {
+        const start = Math.max(0, m.index - 160);
+        if ([...seen].some((s) => Math.abs(s - start) < 120)) continue;
+        seen.add(start);
+        out.push(redact(txt.slice(start, m.index + 340)).replace(/\s+/g, " "));
+      }
+      return out;
+    };
+    const grab = async (path) => {
+      const r = await get(path);
+      if (r.status !== 200) return { path, status: r.status || r.error };
+      const t = r.text;
+      return {
+        path, len: t.length,
+        functions: [...new Set([...t.matchAll(/function\s+(\w+)\s*\(/g)].map((m) => m[1]))].filter((n) => /send|arm|command|panel|keypad|status|dss|update|zone/i.test(n)).slice(0, 40),
+        windows: windows(t),
+      };
+    };
+    return {
+      loggedIn: true,
+      security: await grab("/Security.aspx"),
+      napcoSiteJs: await grab("/Scripts/NapcoSite.js"),
+    };
+  })
+);
+
 // Admin: map the DSS command codes. Logs in, reads Default.aspx (+ its inline JS
 // and referenced scripts) and extracts every DSS.aspx CommandText reference plus
 // the code around arm/disarm/status, so we learn which number arms/disarms/reads.
