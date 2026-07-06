@@ -431,6 +431,7 @@ const PROBES = [
   { key: "geovision-unlock", label: "GV-Access Test Unlock (ctrl 1 / door 4)", path: "/api/geovision/test-unlock?ctrl=1&door=4" },
   { key: "napco", label: "Napco Alarm — Login Probe", path: "/api/napco/debug" },
   { key: "napco-probe", label: "Napco Alarm — Crawl Module/Host", path: "/api/napco/probe" },
+  { key: "napco-login", label: "Napco Alarm — Log In + Map Commands", path: "/api/napco/login-test" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },
