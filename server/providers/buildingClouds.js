@@ -484,12 +484,14 @@ geovisionRouter.get(
     };
     const absFrom = (dir, s) => (s.startsWith("http") ? null : s.startsWith("/") ? s : dir + s.replace(/^\.?\//, ""));
 
-    // 1. Mobile SPA index + its JS/CSS bundles.
+    // 1. Mobile SPA index + its JS/CSS bundles. The shell redirects to
+    // <shell-dir>/ASMobile/#/ — the shell is /ASWeb/ASWeb.srf, so it's at
+    // /ASWeb/ASMobile/ (NOT /ASMobile/, which 404s).
     let idx, idxPath;
-    for (const p of ["/ASMobile/", "/ASMobile/index.html"]) {
+    for (const p of ["/ASWeb/ASMobile/", "/ASWeb/ASMobile/index.html", "/ASWeb/asmobile/"]) {
       const r = await get(p); if (r.status === 200 && r.len > 100) { idx = r; idxPath = p; break; } idx = idx || r; idxPath = idxPath || p;
     }
-    const mDir = "/ASMobile/";
+    const mDir = (idxPath || "/ASWeb/ASMobile/").replace(/index\.html$/, "");
     const assets = idx?.text ? [...new Set([
       ...[...idx.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]),
       ...[...idx.text.matchAll(/["']([\w./-]+\.js)["']/gi)].map((m) => m[1]),
@@ -515,10 +517,31 @@ geovisionRouter.get(
       ? [...new Set(req.text.match(/["'`][\w./-]*modules?\/[\w./-]+["'`]/gi) || [])].map((s) => s.slice(1, -1)).slice(0, 60)
       : [];
 
+    // 4. Modules live under /ASWeb/modules/<Name>/<Name>.js (we saw LiveLog,
+    // LPRList). Probe likely access-control module names and scan any hit for
+    // DOOR_OPERATION + the request-build code.
+    const modNames = ["Monitor", "Monitoring", "AccessControl", "Access", "Door", "DoorControl",
+      "Controller", "ControllerList", "Device", "DeviceMonitor", "LiveMonitor", "MonitorView"];
+    const modCandidates = modNames.flatMap((n) => [
+      `/ASWeb/modules/${n}/${n}.js`, `/ASWeb/modules/${n}/index.js`, `/ASWeb/modules/${n}/main.js`,
+    ]);
+    const moduleHits = [];
+    for (const p of modCandidates) {
+      const r = await get(p);
+      if (r.status === 200 && r.len > 40) {
+        const hasDoorOp = /DOOR_OPERATION/.test(r.text);
+        let doorCtx;
+        if (hasDoorOp) { const i = r.text.indexOf("DOOR_OPERATION"); doorCtx = redact(r.text.slice(Math.max(0, i - 700), i + 700)); }
+        moduleHits.push({ path: p, len: r.len, hasDoorOp, doorCtx });
+      }
+    }
+    moduleHits.sort((a, b) => (a.hasDoorOp ? 0 : 1) - (b.hasDoorOp ? 0 : 1) || b.len - a.len);
+
     return {
       base,
       mobile: { indexPath: idxPath, status: idx?.status, len: idx?.len, indexHead: redact(idx?.text || "").slice(0, 1200), assets, bundles, urls, doorStr },
-      requireJs: { status: req.status, len: req.len, modulePaths, head: redact(req.text || "").slice(0, 1500) },
+      requireJs: { status: req.status, len: req.len, modulePaths, head: redact(req.text || "").slice(0, 800) },
+      moduleHits,
     };
   })
 );
