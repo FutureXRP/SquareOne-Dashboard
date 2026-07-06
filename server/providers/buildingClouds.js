@@ -65,7 +65,9 @@ async function gvCommand(fields, retry = true) {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      Cookie: cookie, Accept: "*/*", "X-Requested-With": "XMLHttpRequest",
+      // The real Monitor sends the server-version cookie alongside the session.
+      Cookie: `${cookie}; GvServerVersion=6.2.0.0`,
+      Accept: "*/*", "X-Requested-With": "XMLHttpRequest",
       Referer: `${c.baseUrl}/ASWeb/ASWeb.srf`, Origin: c.baseUrl,
     },
     body: new URLSearchParams({ client_guid: GV_CLIENT_GUID, ...fields }).toString(),
@@ -78,9 +80,21 @@ async function gvCommand(fields, retry = true) {
   return { status: res.status, text: await res.text() };
 }
 
-// Unlock / lock a door by controller id + door id.
-const gvDoorOp = (ctrlId, drId, operation) =>
-  gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation });
+// GV door operations only succeed for a client_guid the server recognizes as a
+// live Monitor client. The Monitor page establishes that by starting its
+// notification long-poll; the first poll with our guid registers the session.
+// wait_time=0 returns immediately (blocking poll uses 60). Fire-and-forget.
+async function gvRegister() {
+  try { return await gvCommand({ action: "LONG_POLLING_NOTIFICATIONS", module: "monitor", wait_time: 0 }); }
+  catch (e) { return { status: 0, text: e.message }; }
+}
+
+// Unlock / lock a door by controller id + door id. Registers our monitor session
+// first so the door engine accepts the client_guid, then sends the operation.
+const gvDoorOp = async (ctrlId, drId, operation) => {
+  await gvRegister();
+  return gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation });
+};
 
 /*
   Building-system cloud providers: Pro1 thermostats, Napco alarm (iBridge/Prima),
@@ -447,13 +461,38 @@ geovisionRouter.post(
 
 // Admin one-off unlock test (GET so it's easy to fire from Diagnostics):
 // /api/geovision/test-unlock?ctrl=1&door=4  — ACTUALLY opens that door.
+// Reports both steps (register the monitor session, then the door op) so a
+// failure is easy to place.
 geovisionRouter.get(
   "/test-unlock",
   requireAdmin,
   guard("geovision", async (req) => {
     const ctrl = Number(req.query.ctrl ?? 1);
     const door = Number(req.query.door ?? 4);
-    const r = await gvDoorOp(ctrl, door, "UNLOCK_DOOR");
-    return { sent: { ctrl, door, operation: "UNLOCK_DOOR" }, status: r.status, response: r.text.slice(0, 300) };
+    const reg = await gvRegister();
+    const op = await gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrl, dr_id: door, operation: "UNLOCK_DOOR" });
+    let parsed = null; try { parsed = JSON.parse(op.text); } catch { /* not json */ }
+    return {
+      sent: { ctrl, door, operation: "UNLOCK_DOOR", client_guid: GV_CLIENT_GUID },
+      register: { status: reg.status, response: reg.text.slice(0, 200) },
+      doorOp: { status: op.status, response: op.text.slice(0, 300) },
+      success: parsed?.success === 1 || parsed?.success === true,
+    };
+  })
+);
+
+// Read the Monitor event log — every door open/close/grant records the door's
+// controller id, door id, and NAME here, which is how we map ids -> names when
+// the controller-list actions come back empty.
+geovisionRouter.get(
+  "/logs",
+  requireAdmin,
+  guard("geovision", async (req) => {
+    await gvRegister(); // logs are per monitor session
+    const max = Number(req.query.max ?? 100);
+    const r = await gvCommand({ action: "GET_LOGS", module: "monitor", wait_time: 0, e_logid: 0, max_log: max });
+    let parsed = null; try { parsed = JSON.parse(r.text); } catch { /* html/text */ }
+    return { status: r.status, count: Array.isArray(parsed?.logs) ? parsed.logs.length : undefined,
+      body: parsed || r.text.slice(0, 2000) };
   })
 );

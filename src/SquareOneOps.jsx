@@ -400,6 +400,7 @@ const PROBES = [
   { key: "geovision-discover", label: "GV-Access Discover Doors", path: "/api/geovision/discover" },
   { key: "geovision-doors", label: "GV-Access Find Door API", path: "/api/geovision/probe-doors" },
   { key: "geovision-monitor", label: "GV-Access Map Doors (ids → names)", path: "/api/geovision/monitor" },
+  { key: "geovision-logs", label: "GV-Access Event Log (door names)", path: "/api/geovision/logs" },
   { key: "geovision-unlock", label: "GV-Access Test Unlock (ctrl 1 / door 4)", path: "/api/geovision/test-unlock?ctrl=1&door=4" },
   { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
