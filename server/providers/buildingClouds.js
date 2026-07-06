@@ -766,19 +766,32 @@ geovisionRouter.get(
   }),
 );
 
-// Unlock / lock a specific door. Body/params: ctrl (controller id), door (dr_id).
-// op path segment: "unlock" | "lock". Attributed to the signed-in user.
+// The GV-Access door menu, mapped to the exact operation constants the
+// controller expects (confirmed from the app's LiveLog.js context menu).
+const GV_DOOR_OPS = {
+  unlock: "UNLOCK_DOOR",              // momentary buzz-open (access-granted pulse)
+  "force-unlock": "FORCE_UNLOCK",     // hold unlocked until released
+  "force-lock": "FORCE_LOCK",         // hold locked — no card access
+  release: "CLEAR_FORCE_LOCKUNLOCK",  // clear a force state, back to schedule
+  lockdown: "LOCK_DOWN",              // emergency lockdown
+};
+
+// Run a door operation. Body: ctrl (controller id), door (dr_id). op path
+// segment is one of GV_DOOR_OPS. Attributed to the signed-in user.
 geovisionRouter.post(
   "/doors/:op",
   requireAuth,
   guard("geovision", async (req) => {
-    const op = req.params.op === "lock" ? "LOCK_DOOR" : "UNLOCK_DOOR";
+    const operation = GV_DOOR_OPS[req.params.op];
+    if (!operation) throw new Error(`Unknown door operation: ${req.params.op}`);
     const ctrl = Number(req.body?.ctrl);
     const door = Number(req.body?.door);
     if (!Number.isFinite(ctrl) || !Number.isFinite(door)) throw new Error("ctrl and door are required.");
-    const r = await gvDoorOp(ctrl, door, op);
-    logAudit(req, `geovision.${req.params.op}`, `ctrl${ctrl}/door${door}`, { status: r.status });
-    return { ok: r.status === 200, status: r.status, response: r.text.slice(0, 200) };
+    const r = await gvDoorOp(ctrl, door, operation);
+    let p = null; try { p = JSON.parse(r.text); } catch { /* not json */ }
+    const ok = p?.success === 1 || p?.success === true;
+    logAudit(req, `geovision.${req.params.op}`, `ctrl${ctrl}/door${door}`, { operation, ok });
+    return { ok, operation, status: r.status, response: r.text.slice(0, 200) };
   })
 );
 
