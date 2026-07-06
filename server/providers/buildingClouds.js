@@ -554,6 +554,77 @@ geovisionRouter.get(
   })
 );
 
+// The real controller/door tree + a hunt for the Monitor module. ControllerList.js
+// revealed the store loads the tree via action=CONTROLLER_LIST on ControllerList.srf,
+// with rows {dvg_id, dvg_name, ctrl_id, ctrl_name, dr_id, dr_name, is_input, dr_enable}
+// — that's the dr_id -> name map. DOOR_OPERATION lives in a separate Monitor module,
+// so we also scan main.js + the shell for every modules/<X> path and probe each for it.
+geovisionRouter.get(
+  "/tree",
+  requireAdmin,
+  guard("geovision", async () => {
+    const base = config.geovision.baseUrl;
+    const cookie = await gvLogin(true);
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const getText = async (p) => { try { const r = await gvGet(p, cookie); return { status: r.status, text: await r.text() }; } catch (e) { return { status: 0, text: "", err: e.message }; } };
+
+    // 1. The door tree. CONTROLLER_LIST is a plain setup action (no module),
+    // paginated — ask for everything.
+    const treeRes = await gvCommand({ action: "CONTROLLER_LIST", type: "all", pos: -1, start: 0, limit: 1000 });
+    let tree = null, doors = [];
+    try { tree = JSON.parse(treeRes.text); } catch { /* not json */ }
+    if (Array.isArray(tree?.data)) {
+      doors = tree.data
+        .filter((r) => Number(r.dr_id) >= 0 && !Number(r.is_input))
+        .map((r) => ({ name: `${r.ctrl_name || ("Ctrl " + r.ctrl_id)} — ${r.dr_name || ("Door " + r.dr_id)}`,
+          ctrl: Number(r.ctrl_id), door: Number(r.dr_id), enabled: !!Number(r.dr_enable) }));
+    }
+
+    // 2. Find the Monitor module (where DOOR_OPERATION + client registration live).
+    const shell = await getText("/ASWeb/ASWeb.srf");
+    const main = await getText("/ASWeb/main/main.js");
+    const scanBlob = `${shell.text}\n${main.text}`;
+    const moduleRefs = [...new Set(scanBlob.match(/modules\/[A-Za-z0-9_]+/g) || [])];
+    // Always include the usual live-monitor suspects.
+    for (const n of ["Monitor", "Monitoring", "LiveView", "LiveMonitor", "AccessMonitor", "RealTimeMonitor", "DeviceMonitor"]) {
+      if (!moduleRefs.includes(`modules/${n}`)) moduleRefs.push(`modules/${n}`);
+    }
+    const monitorHits = [];
+    for (const m of moduleRefs.slice(0, 40)) {
+      const name = m.split("/")[1];
+      for (const file of [`${name}.js`, "index.js", "main.js"]) {
+        const r = await getText(`/ASWeb/${m}/${file}`);
+        if (r.status === 200 && r.text.length > 40) {
+          const hasDoorOp = /DOOR_OPERATION/.test(r.text);
+          const hasPoll = /LONG_POLLING_NOTIFICATIONS/.test(r.text);
+          let ctx;
+          if (hasDoorOp || hasPoll) {
+            const needle = hasDoorOp ? "DOOR_OPERATION" : "LONG_POLLING_NOTIFICATIONS";
+            const i = r.text.indexOf(needle);
+            ctx = redact(r.text.slice(Math.max(0, i - 900), i + 900));
+          }
+          monitorHits.push({ path: `/ASWeb/${m}/${file}`, len: r.text.length, hasDoorOp, hasPoll, ctx });
+          break; // found the module file; don't try index/main too
+        }
+      }
+    }
+    monitorHits.sort((a, b) => ((b.hasDoorOp || b.hasPoll) ? 1 : 0) - ((a.hasDoorOp || a.hasPoll) ? 1 : 0) || b.len - a.len);
+
+    return {
+      base,
+      doorCount: doors.length,
+      doors,
+      treeStatus: treeRes.status,
+      treeSuccess: tree?.success,
+      treeRaw: doors.length ? undefined : redact(treeRes.text).slice(0, 1500), // show raw only if parse/empty
+      moduleRefs,
+      monitorHits,
+      // Ready-to-paste GV_DOORS value.
+      GV_DOORS: doors.length ? JSON.stringify(doors.map(({ name, ctrl, door }) => ({ name, ctrl, door }))) : undefined,
+    };
+  })
+);
+
 // Directly probe GV-ASManager ASWeb door/controller .srf handlers (Door/GetList
 // .srf already returns 500 = exists). Tries GET+POST and reports status + body,
 // so the real list + open endpoints (and their params) can be read off.
