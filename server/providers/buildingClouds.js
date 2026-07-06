@@ -795,6 +795,30 @@ geovisionRouter.post(
   })
 );
 
+// Run one operation on EVERY door (campus-wide controls). Registers once, then
+// fires all doors together (shared server guid). Attributed to the signed-in user.
+geovisionRouter.post(
+  "/doors-all/:op",
+  requireAuth,
+  guard("geovision", async (req) => {
+    const operation = GV_DOOR_OPS[req.params.op];
+    if (!operation) throw new Error(`Unknown door operation: ${req.params.op}`);
+    const doors = await gvDoorTree();
+    if (!doors || !doors.length) throw new Error("No doors available from the controller.");
+    await gvRegister(); // prime the shared guid so the fan-out reuses it
+    const results = await Promise.all(doors.map(async (d) => {
+      try {
+        const r = await gvDoorOp(d.ctrl, d.door, operation);
+        let p = null; try { p = JSON.parse(r.text); } catch { /* not json */ }
+        return { name: d.name, ok: p?.success === 1 || p?.success === true };
+      } catch (e) { return { name: d.name, ok: false, err: e.message }; }
+    }));
+    const okCount = results.filter((r) => r.ok).length;
+    logAudit(req, `geovision.all.${req.params.op}`, "all-doors", { operation, okCount, total: results.length });
+    return { ok: okCount > 0, okCount, total: results.length, results };
+  })
+);
+
 // Admin one-off unlock test (GET so it's easy to fire from Diagnostics):
 // /api/geovision/test-unlock?ctrl=1&door=4  — ACTUALLY opens that door.
 // Reports both steps (register the monitor session, then the door op) so a
