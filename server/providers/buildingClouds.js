@@ -492,10 +492,14 @@ geovisionRouter.get(
       const r = await get(p); if (r.status === 200 && r.len > 100) { idx = r; idxPath = p; break; } idx = idx || r; idxPath = idxPath || p;
     }
     const mDir = (idxPath || "/ASWeb/ASMobile/").replace(/index\.html$/, "");
+    // RequireJS names the app entry in a data-main attr; resolve + follow it.
+    const dataMain = (idx?.text?.match(/data-main\s*=\s*["']([^"']+)["']/i) || [])[1];
+    const dataMainPath = dataMain ? absFrom(mDir, dataMain.replace(/\.js$/, "") + ".js") : null;
     const assets = idx?.text ? [...new Set([
-      ...[...idx.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]),
-      ...[...idx.text.matchAll(/["']([\w./-]+\.js)["']/gi)].map((m) => m[1]),
-    ])].map((s) => absFrom(mDir, s)).filter(Boolean).slice(0, 20) : [];
+      dataMainPath,
+      ...[...idx.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).map((s) => absFrom(mDir, s)),
+      ...[...idx.text.matchAll(/["']([\w./-]+\.js)["']/gi)].map((m) => absFrom(mDir, m[1])),
+    ])].filter(Boolean).slice(0, 20) : [];
 
     // 2. Fetch the bundles and mine them for API endpoints + door verbs.
     const bundles = []; const texts = [];
@@ -517,31 +521,35 @@ geovisionRouter.get(
       ? [...new Set(req.text.match(/["'`][\w./-]*modules?\/[\w./-]+["'`]/gi) || [])].map((s) => s.slice(1, -1)).slice(0, 60)
       : [];
 
-    // 4. Modules live under /ASWeb/modules/<Name>/<Name>.js (we saw LiveLog,
-    // LPRList). Probe likely access-control module names and scan any hit for
-    // DOOR_OPERATION + the request-build code.
-    const modNames = ["Monitor", "Monitoring", "AccessControl", "Access", "Door", "DoorControl",
-      "Controller", "ControllerList", "Device", "DeviceMonitor", "LiveMonitor", "MonitorView"];
-    const modCandidates = modNames.flatMap((n) => [
-      `/ASWeb/modules/${n}/${n}.js`, `/ASWeb/modules/${n}/index.js`, `/ASWeb/modules/${n}/main.js`,
-    ]);
-    const moduleHits = [];
-    for (const p of modCandidates) {
-      const r = await get(p);
-      if (r.status === 200 && r.len > 40) {
-        const hasDoorOp = /DOOR_OPERATION/.test(r.text);
-        let doorCtx;
-        if (hasDoorOp) { const i = r.text.indexOf("DOOR_OPERATION"); doorCtx = redact(r.text.slice(Math.max(0, i - 700), i + 700)); }
-        moduleHits.push({ path: p, len: r.len, hasDoorOp, doorCtx });
-      }
+    // 4. The confirmed desktop module. ControllerList.js (behind
+    // ControllerList.srf) is where the door list loads and the unlock command is
+    // built. Dump it whole (redacted) + its RequireJS define() deps and every
+    // action/operation-ish string, so the exact request shape is readable.
+    const clPath = "/ASWeb/modules/ControllerList/ControllerList.js";
+    const cl = await get(clPath);
+    let controllerList;
+    if (cl.status === 200) {
+      const t = cl.text;
+      const deps = (t.match(/define\(\s*\[([^\]]*)\]/) || [])[1];
+      const strs = [...new Set(t.match(/["'`][A-Za-z0-9_./?=&-]{2,60}["'`]/g) || [])]
+        .map((s) => s.slice(1, -1))
+        .filter((s) => /door|open|unlock|lock|operation|action|controller|srf|api|guid|monitor|dvg|ctrl|dr_/i.test(s))
+        .slice(0, 80);
+      controllerList = {
+        path: clPath, len: cl.len,
+        depsRaw: deps ? deps.replace(/\s+/g, " ").slice(0, 400) : undefined,
+        interestingStrings: strs,
+        full: redact(t).slice(0, 14000),   // whole module, token-redacted
+      };
+    } else {
+      controllerList = { path: clPath, status: cl.status };
     }
-    moduleHits.sort((a, b) => (a.hasDoorOp ? 0 : 1) - (b.hasDoorOp ? 0 : 1) || b.len - a.len);
 
     return {
       base,
-      mobile: { indexPath: idxPath, status: idx?.status, len: idx?.len, indexHead: redact(idx?.text || "").slice(0, 1200), assets, bundles, urls, doorStr },
-      requireJs: { status: req.status, len: req.len, modulePaths, head: redact(req.text || "").slice(0, 800) },
-      moduleHits,
+      mobile: { indexPath: idxPath, status: idx?.status, len: idx?.len, dataMain, dataMainPath, assets, bundles, urls, doorStr, indexHead: redact(idx?.text || "").slice(0, 900) },
+      requireJs: { status: req.status, len: req.len, modulePaths },
+      controllerList,
     };
   })
 );
