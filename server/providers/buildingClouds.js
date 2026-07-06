@@ -851,14 +851,30 @@ geovisionRouter.get(
   guard("geovision", async () => {
     const cookie = await gvLogin(true);
     const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
-    const get = async (p) => { const r = await gvGet(p, cookie); return { path: p, status: r.status, text: await r.text() }; };
+    // Never let one bad path abort the probe (a 404 can reset the connection).
+    const get = async (p) => {
+      try { const r = await gvGet(p, cookie); return { path: p, status: r.status, text: await r.text() }; }
+      catch (e) { return { path: p, status: 0, text: "", err: e.message }; }
+    };
 
-    // baseUrl is /ASWeb/ (modules/... resolves there), so "ServerConnector" -> /ASWeb/ServerConnector.js.
+    // Resolve ServerConnector's real path from the RequireJS paths config first
+    // (main.js / shell), then fall back to guesses relative to baseUrl /ASWeb/.
+    const cfgSrc = `${(await get("/ASWeb/main/main.js")).text}\n${(await get("/ASWeb/ASWeb.srf")).text}\n${(await get("/ASWeb/main/require.js")).text}`;
+    const mapped = (cfgSrc.match(/["']?ServerConnector["']?\s*:\s*["']([^"']+)["']/) || [])[1];
+    const candidates = [
+      mapped && `/ASWeb/${mapped.replace(/^\.?\//, "").replace(/\.js$/, "")}.js`,
+      "/ASWeb/ServerConnector.js", "/ASWeb/main/ServerConnector.js", "/ASWeb/js/ServerConnector.js",
+      "/ASWeb/lib/ServerConnector.js", "/ASWeb/common/ServerConnector.js", "/ASWeb/src/ServerConnector.js",
+      "/ASWeb/module/ServerConnector.js", "/ASWeb/main/js/ServerConnector.js",
+    ].filter(Boolean);
+    const probe = [];
     let file = null;
-    for (const p of ["/ASWeb/ServerConnector.js", "/ASWeb/main/ServerConnector.js", "/ASWeb/js/ServerConnector.js", "/ASWeb/lib/ServerConnector.js"]) {
-      const r = await get(p); if (r.status === 200 && r.text.length > 100) { file = r; break; }
+    for (const p of candidates) {
+      const r = await get(p);
+      probe.push({ path: p, status: r.status, len: r.text.length, err: r.err });
+      if (!file && r.status === 200 && r.text.length > 100) file = r;
     }
-    if (!file) return { found: false, tried: "ServerConnector.js in /ASWeb/, /ASWeb/main/, /ASWeb/js/, /ASWeb/lib/" };
+    if (!file) return { found: false, mapped, probe };
 
     const t = file.text;
     const uniq = (a) => [...new Set(a)];
@@ -870,7 +886,7 @@ geovisionRouter.get(
       return out;
     };
     return {
-      found: true, path: file.path, len: t.length, actions, urls,
+      found: true, path: file.path, mapped, len: t.length, actions, urls,
       getClientGUIDCtx: ctxOf("getClientGUID"),
       addNotificationsCtx: ctxOf("addNotifications"),
       guidGenCtx: ctxOf("(?:S4|uuid|GUID|guid)\\s*[=:(]", 320, 4),
