@@ -341,16 +341,20 @@ geovisionRouter.get(
       return base + s.replace(/^\.?\//, "");                // resolve relative to /asweb/
     };
 
-    // 1. Main app shell.
-    let shell;
-    try { shell = await getText("/asweb/ASWeb.srf"); }
-    catch (e) { return { loggedIn: true, error: `ASWeb.srf: ${e.message}` }; }
+    // 1. Main app shell. The real Monitor uses the capital /ASWeb/ path (that's
+    // the Referer the captured door command sent), so try both casings.
+    let shell, shellPath;
+    for (const p of ["/ASWeb/ASWeb.srf", "/asweb/ASWeb.srf"]) {
+      try { const r = await getText(p); if (r.status < 400 && r.text.length > 200) { shell = r; shellPath = p; break; } shell = shell || r; shellPath = shellPath || p; }
+      catch (e) { shell = shell || { status: 0, text: "", err: e.message }; }
+    }
+    const shellBase = shellPath.replace(/ASWeb\.srf$/, ""); // e.g. /ASWeb/
 
-    // 2. Its <script src> bundles (resolve relative to /asweb/).
+    // 2. Its <script src> bundles (resolve relative to the shell's directory).
     const scripts = [...new Set([...shell.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)]
-      .map((m) => absUnder("/asweb/", m[1])).filter(Boolean))].slice(0, 12);
+      .map((m) => absUnder(shellBase, m[1])).filter(Boolean))].slice(0, 16);
 
-    // 3. Fetch the JS and mine everything for endpoint + door-control clues.
+    // 3. Fetch the JS and mine everything for endpoint + action clues.
     const texts = [shell.text];
     const jsLoaded = [];
     for (const src of scripts) {
@@ -362,12 +366,34 @@ geovisionRouter.get(
     const doorEndpoints = [...new Set((blob.match(/["'`][^"'`]*(door|access|open|unlock|controller|output|reader|monitor|getlist|status)[^"'`]*["'`]/gi) || [])
       .map((s) => s.slice(1, -1)).filter((s) => s.length < 90))].slice(0, 100);
 
+    // 4. The action vocabulary: DOOR_OPERATION / LONG_POLLING_NOTIFICATIONS /
+    // GET_LOGS are ALL_CAPS_SNAKE constants, so every action verb the app can
+    // send looks the same. List them all — the monitor-init and door-tree
+    // actions we couldn't guess will be in here.
+    const actions = [...new Set(blob.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/g) || [])]
+      .filter((t) => t.length >= 5 && t.length <= 40).sort().slice(0, 200);
+
+    // 5. The code right around the strings we care about, so the request-build
+    // sequence (which action registers the client_guid, what precedes a door op)
+    // is readable. Token-redacted, a few windows each.
+    const contextOf = (needle, span = 260, max = 3) => {
+      const out = []; let i = -1;
+      while ((i = blob.indexOf(needle, i + 1)) !== -1 && out.length < max) {
+        out.push(blob.slice(Math.max(0, i - span), i + needle.length + span).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…"));
+      }
+      return out;
+    };
+
     return {
-      loggedIn: true, base: config.geovision.baseUrl,
+      loggedIn: true, base: config.geovision.baseUrl, shellPath,
       shell: { status: shell.status, len: shell.text.length },
       scripts, jsLoaded,
       srf,                 // every .srf endpoint referenced by the app
       doorEndpoints,       // strings mentioning door/access/open/controller/etc.
+      actions,             // every ALL_CAPS action constant found in the JS
+      doorOpContext: contextOf("DOOR_OPERATION"),
+      clientGuidContext: contextOf("client_guid"),
+      monitorContext: contextOf("LONG_POLLING_NOTIFICATIONS"),
     };
   })
 );
