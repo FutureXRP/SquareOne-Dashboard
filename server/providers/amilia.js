@@ -390,7 +390,7 @@ amiliaRouter.get(
     let res = null;
     try { res = await get("/locations", jwt); } catch { /* empty */ }
     const items = res?.Items || (Array.isArray(res) ? res : []) || [];
-    const today = new Date().toLocaleDateString("en-US", { weekday: "long" });
+    const today = new Date().toLocaleDateString("en-US", { weekday: "long", timeZone: config.timezone });
     const hm = (t) => {
       if (!t) return "";
       const [h, m] = t.split(":");
@@ -412,13 +412,15 @@ amiliaRouter.get(
 function isoDay(offset) {
   return new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 }
+// Amilia returns times in UTC; format them in the org's timezone (the server
+// runs in UTC on Vercel, so an unqualified format would be 5-6 hours off).
 function fmtTime(v) {
   if (!v) return "—";
   const d = new Date(v);
-  return isNaN(d) ? String(v) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return isNaN(d) ? String(v) : d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: config.timezone });
 }
 function fmtDate(v) {
   if (!v) return "—";
   const d = new Date(v);
-  return isNaN(d) ? String(v) : d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  return isNaN(d) ? String(v) : d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: config.timezone });
 }
