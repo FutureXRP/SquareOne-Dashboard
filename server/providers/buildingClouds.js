@@ -464,6 +464,65 @@ geovisionRouter.get(
   })
 );
 
+// The shell redirects phones to /ASMobile/ — a modern SPA that IS the GV-Access
+// app's backend, with a clean JSON door API. Crawl its index + JS bundles for
+// the door-list / door-open endpoints, and dump main/require.js (the desktop's
+// RequireJS module map) to learn the real Monitor module name.
+geovisionRouter.get(
+  "/mobile",
+  requireAdmin,
+  guard("geovision", async () => {
+    const base = config.geovision.baseUrl;
+    const cookie = await gvLogin(true);
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const res = await gvGet(path, cookie);
+        const text = await res.text();
+        return { path, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length, text };
+      } catch (e) { return { path, error: e.message }; }
+    };
+    const absFrom = (dir, s) => (s.startsWith("http") ? null : s.startsWith("/") ? s : dir + s.replace(/^\.?\//, ""));
+
+    // 1. Mobile SPA index + its JS/CSS bundles.
+    let idx, idxPath;
+    for (const p of ["/ASMobile/", "/ASMobile/index.html"]) {
+      const r = await get(p); if (r.status === 200 && r.len > 100) { idx = r; idxPath = p; break; } idx = idx || r; idxPath = idxPath || p;
+    }
+    const mDir = "/ASMobile/";
+    const assets = idx?.text ? [...new Set([
+      ...[...idx.text.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]),
+      ...[...idx.text.matchAll(/["']([\w./-]+\.js)["']/gi)].map((m) => m[1]),
+    ])].map((s) => absFrom(mDir, s)).filter(Boolean).slice(0, 20) : [];
+
+    // 2. Fetch the bundles and mine them for API endpoints + door verbs.
+    const bundles = []; const texts = [];
+    for (const a of assets) {
+      const r = await get(a);
+      bundles.push({ src: a, status: r.status, len: r.len });
+      if (r.status === 200) texts.push(r.text);
+    }
+    const blob = texts.join("\n");
+    // API-ish URL literals, and any string mentioning door/open/unlock/access.
+    const urls = [...new Set(blob.match(/["'`][/][\w./-]*(?:api|door|access|open|unlock|controller|monitor|login|token)[\w./-]*["'`]/gi) || [])]
+      .map((s) => s.slice(1, -1)).filter((s) => s.length < 100).slice(0, 80);
+    const doorStr = [...new Set(blob.match(/["'`][^"'`]{0,40}(?:door|unlock|openDoor|access)[^"'`]{0,40}["'`]/gi) || [])]
+      .map((s) => s.slice(1, -1)).filter((s) => s.length < 90).slice(0, 60);
+
+    // 3. RequireJS module map — names the real desktop Monitor module.
+    const req = await get("/ASWeb/main/require.js");
+    const modulePaths = req.status === 200
+      ? [...new Set(req.text.match(/["'`][\w./-]*modules?\/[\w./-]+["'`]/gi) || [])].map((s) => s.slice(1, -1)).slice(0, 60)
+      : [];
+
+    return {
+      base,
+      mobile: { indexPath: idxPath, status: idx?.status, len: idx?.len, indexHead: redact(idx?.text || "").slice(0, 1200), assets, bundles, urls, doorStr },
+      requireJs: { status: req.status, len: req.len, modulePaths, head: redact(req.text || "").slice(0, 1500) },
+    };
+  })
+);
+
 // Directly probe GV-ASManager ASWeb door/controller .srf handlers (Door/GetList
 // .srf already returns 500 = exists). Tries GET+POST and reports status + body,
 // so the real list + open endpoints (and their params) can be read off.
