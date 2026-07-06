@@ -312,6 +312,81 @@ napcoRouter.get(
   })
 );
 
+// iBridge Online (ibridgeonline.com) login — classic ASP.NET WebForms:
+//   GET /login.aspx  -> read __VIEWSTATE / __VIEWSTATEGENERATOR / __EVENTVALIDATION
+//   POST /login.aspx with those + txtuserID / txtPassword / btnLogin
+//   success -> 302 away from login, with an auth cookie we carry forward.
+async function napcoLogin(username, password) {
+  const base = config.napco.baseUrl;
+  const g = await fetch(`${base}/login.aspx`, { redirect: "manual", signal: AbortSignal.timeout(12000) });
+  const jar0 = cookieJar(g);
+  const html = await g.text();
+  const hidden = (n) => (html.match(new RegExp(`name="${n}"[^>]*value="([^"]*)"`, "i")) || [])[1] || "";
+  const body = new URLSearchParams({
+    __VIEWSTATE: hidden("__VIEWSTATE"),
+    __VIEWSTATEGENERATOR: hidden("__VIEWSTATEGENERATOR"),
+    __EVENTVALIDATION: hidden("__EVENTVALIDATION"),
+    "ctl00$MainContent$txtuserID": username,
+    "ctl00$MainContent$txtPassword": password,
+    "ctl00$MainContent$btnLogin": "Login",
+  });
+  const p = await fetch(`${base}/login.aspx`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: jar0, Accept: "text/html,*/*" },
+    body: body.toString(), redirect: "manual", signal: AbortSignal.timeout(12000),
+  });
+  const jar = [jar0, cookieJar(p)].filter(Boolean).join("; ");
+  const loc = p.headers.get("location") || "";
+  const ok = p.status === 302 && !/login\.aspx/i.test(loc); // redirected AWAY from login = success
+  return { ok, status: p.status, location: loc, cookie: jar };
+}
+
+// Admin: verify the iBridge Online login and map the arm/disarm surface. Logs in,
+// then pulls the authenticated home + NapcoSite.js + DSS.aspx to find the command
+// endpoint/params. Credentials come from the operator's vault or NAPCO_ env vars.
+napcoRouter.get(
+  "/login-test",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    const out = {
+      loggedIn: login.ok, status: login.status, location: login.location,
+      cookies: login.cookie.split("; ").map((x) => x.split("=")[0]).filter(Boolean),
+    };
+    if (!login.ok) return out;
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const r = await fetch(`${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+        return { status: r.status, text: await r.text() };
+      } catch (e) { return { error: e.message }; }
+    };
+    const home = await get("/default.aspx");
+    const site = await get("/Scripts/NapcoSite.js");
+    const homeTxt = home.text || "";
+    const siteTxt = site.text || "";
+    out.home = {
+      status: home.status,
+      title: (homeTxt.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1]?.trim(),
+      // Panel/arm/status strings + control ids on the authenticated home.
+      hints: [...new Set((homeTxt.match(/["'][^"'<>]*(arm|disarm|stay|status|panel|zone|DSS|command|keypad)[^"'<>]*["']/gi) || []).map((s) => s.slice(1, -1)).filter((s) => s.length < 90))].slice(0, 50),
+    };
+    // NapcoSite.js drives the arm/disarm AJAX — surface its endpoints + the code
+    // around arm/disarm/DSS so the exact command call is readable.
+    const ctxAround = (re) => { const i = siteTxt.search(re); return i >= 0 ? redact(siteTxt.slice(Math.max(0, i - 300), i + 500)) : null; };
+    out.napcoSiteJs = site.status === 200 ? {
+      len: siteTxt.length,
+      endpoints: [...new Set((siteTxt.match(/[\w./-]+\.aspx[\w?=&%$.-]*/gi) || []))].slice(0, 40),
+      dssContext: ctxAround(/DSS\.aspx/i),
+      armContext: ctxAround(/\b(arm|disarm)\b/i),
+    } : { status: site.status };
+    return out;
+  })
+);
+
 // GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
 // hosts to guess: the app talks to one server address, which the owner supplies.
 export const geovisionRouter = makeProbeRouter("geovision");
