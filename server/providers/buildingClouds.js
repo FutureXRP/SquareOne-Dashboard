@@ -59,14 +59,29 @@ async function gvGet(path, cookie) {
 */
 const GV_CLIENT_GUID = crypto.randomUUID().toUpperCase();
 
+// The Monitor page declares WHICH modules it's watching via this cookie. The
+// server uses it as the client's monitor subscription — without it, monitor
+// actions (long-poll, door ops) come back errcode 4, and GET_LOGS omits the
+// access log. Value copied verbatim from the real client (access/alarm/event on).
+const GV_MONITOR_LAYOUT = encodeURIComponent(JSON.stringify({
+  access: 1, alarm: 1, event: 1, lpr: 1, iobox: 0, system: 0, user_action: 0,
+  info: 1, video: 0, map: 0, alarm_map: 1, locate_people: 0, area: 0, parkings: {}, patrols: {},
+}));
+
+// The exact cookie header the real Monitor sends: session + version + user + the
+// monitor layout subscription.
+function gvCookieHeader(sessionJar) {
+  const user = config.geovision.username || "Admin";
+  return `${sessionJar}; GvServerVersion=6.2.0.0; GvWebUser=${encodeURIComponent(user)}; ASWebMonitorLayout=${GV_MONITOR_LAYOUT}`;
+}
+
 async function gvCommand(fields, retry = true) {
   const c = config.geovision;
   const send = (cookie) => fetch(`${c.baseUrl}/ASWeb/bin/ControllerList.srf`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      // The real Monitor sends the server-version cookie alongside the session.
-      Cookie: `${cookie}; GvServerVersion=6.2.0.0`,
+      Cookie: gvCookieHeader(cookie),
       Accept: "*/*", "X-Requested-With": "XMLHttpRequest",
       Referer: `${c.baseUrl}/ASWeb/ASWeb.srf`, Origin: c.baseUrl,
     },
@@ -414,25 +429,44 @@ geovisionRouter.get(
   })
 );
 
-// Discover the controller/door tree so we can map dr_id -> name. The Monitor
-// panel loads it from the same ControllerList.srf handler; try the likely list
-// actions and return whatever comes back.
+// Discover the real ControllerList.srf action menu. The handler returns an
+// empty body for actions it doesn't know and a JSON object for ones it does
+// (DOOR_OPERATION, LONG_POLLING_NOTIFICATIONS, GET_LOGS all answer JSON). So we
+// brute-force candidate names and surface every one that comes back with JSON —
+// that reveals the monitor-init/subscribe action and the controller/door tree.
 geovisionRouter.get(
   "/monitor",
   requireAdmin,
   guard("geovision", async () => {
     const actions = [
-      "GET_CONTROLLERS", "GET_CONTROLLER_LIST", "GET_MONITOR_DATA", "GET_MONITOR_TREE",
-      "GET_DEVICE_LIST", "GET_DEVICE_GROUPS", "GET_DOORS", "GET_TREE", "INIT_MONITOR",
+      // init / subscribe (what registers a monitor client)
+      "INIT", "INIT_MONITOR", "MONITOR_INIT", "INIT_DATA", "GET_INIT_DATA", "INIT_MONITOR_DATA",
+      "ENTER_MONITOR", "START_MONITOR", "MONITOR_START", "REGISTER", "REGISTER_CLIENT",
+      "SUBSCRIBE", "SUBSCRIBE_NOTIFICATIONS", "CONNECT", "OPEN_MONITOR", "LOAD_MONITOR",
+      // device / controller / door tree (what maps ids -> names)
+      "GET_CONTROLLERS", "GET_CONTROLLER_LIST", "GET_CONTROLLER", "GET_CONTROLLER_STATUS",
+      "GET_MONITOR_DATA", "GET_MONITOR_TREE", "GET_DEVICE_LIST", "GET_DEVICE_GROUPS",
+      "GET_DEVICE_TREE", "GET_DOORS", "GET_DOOR_LIST", "GET_DOOR_STATUS", "GET_TREE",
+      "GET_NODE_LIST", "GET_NODES", "GET_ACCESS_LIST", "GET_STATUS", "GET_ALL_STATUS",
+      "GET_DVG", "GET_DVG_LIST", "GET_DEVICE_GROUP_LIST", "GET_MAP_DATA",
+      // known-good, as a control (should answer JSON)
+      "GET_LOGS",
     ];
     const out = [];
     for (const action of actions) {
-      const r = await gvCommand({ action, module: "monitor" });
-      out.push({ action, status: r.status, len: r.text.length, body: r.text.slice(0, 700).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…") });
+      const r = await gvCommand({ action, module: "monitor", wait_time: 0, dvg_id: 0 });
+      let parsed = null; try { parsed = JSON.parse(r.text); } catch { /* empty/html */ }
+      out.push({
+        action, status: r.status, len: r.text.length,
+        real: parsed !== null,                         // handler recognized it
+        errcode: parsed?.errcode,
+        keys: parsed && typeof parsed === "object" ? Object.keys(parsed).slice(0, 15) : undefined,
+        body: r.text.slice(0, 900).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…"),
+      });
     }
-    // Most useful first: a 200 with real content.
-    out.sort((a, b) => ((a.status === 200 && a.len > 5) ? 0 : 1) - ((b.status === 200 && b.len > 5) ? 0 : 1));
-    return { base: config.geovision.baseUrl, actions: out };
+    // Real actions first, and among those, the ones that succeeded (errcode 0).
+    out.sort((a, b) => (a.real ? 0 : 1) - (b.real ? 0 : 1) || ((a.errcode === 0) ? 0 : 1) - ((b.errcode === 0) ? 0 : 1));
+    return { base: config.geovision.baseUrl, hint: "actions with real:true are recognized; errcode:0 = succeeded", actions: out };
   })
 );
 
