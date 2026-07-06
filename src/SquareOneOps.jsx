@@ -399,6 +399,7 @@ const PROBES = [
   { key: "geovision-login", label: "GV-Access Login Test (deep)", path: "/api/geovision/login-probe" },
   { key: "geovision-discover", label: "GV-Access Discover Doors", path: "/api/geovision/discover" },
   { key: "geovision-shell", label: "GV-Access Find Monitor Module", path: "/api/geovision/shell" },
+  { key: "geovision-mobile", label: "GV-Access Mobile API (best)", path: "/api/geovision/mobile" },
   { key: "geovision-doors", label: "GV-Access Find Door API", path: "/api/geovision/probe-doors" },
   { key: "geovision-monitor", label: "GV-Access Map Doors (ids → names)", path: "/api/geovision/monitor" },
   { key: "geovision-logs", label: "GV-Access Event Log (door names)", path: "/api/geovision/logs" },
