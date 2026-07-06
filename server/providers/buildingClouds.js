@@ -444,15 +444,32 @@ napcoRouter.get(
     // ibridge DSS handler. Prefer the hidden value unless it's localhost/empty.
     let proxyUrl = proxy && !/localhost|127\.0\.0\.1/i.test(proxy) ? proxy : `${c.baseUrl}/ibridge/DSS.aspx`;
 
-    // READ-ONLY poll (CommandText=26 = status). No arm/disarm commands issued.
+    // READ-ONLY DSS call. CommandText 23 = connect/open bridge, 26 = status poll.
+    // No arm/disarm (those are SendC1Command keystrokes) — safe on a live panel.
     const dss = async (cmd, params = "") => {
       const u = `${proxyUrl}${proxyUrl.includes("?") ? "&" : "?"}CommandText=${encodeURIComponent(cmd)}&PageName=SSS2&Params=${encodeURIComponent(params)}`;
       const r = await get(u);
-      return { cmd, status: r.status, body: r.error ? undefined : redact(r.text).slice(0, 800), error: r.error };
+      return { cmd, status: r.status, body: r.error ? undefined : redact(r.text).slice(0, 700), error: r.error };
     };
-    const poll = await dss("26", "");
+    const bridged = (b) => /<BridgedWithRCM>\s*1\s*<\/BridgedWithRCM>/i.test(b || "");
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    return { loggedIn: true, securityStatus: sec.status, proxyRaw: proxy, proxyUrl, hiddenParams: hiddens, statusPoll: poll };
+    // 1. Open the bridge to the on-site panel (CheckKeyPadtype -> Send23Command("23")).
+    const connect = await dss("23", "");
+    // 2. Poll status until the RCM bridge reports connected (browser polls every
+    // 500ms; give the on-site module a few tries to come online).
+    const polls = [];
+    for (let i = 0; i < 5; i++) {
+      await wait(700);
+      const p = await dss("26", "");
+      polls.push(p);
+      if (bridged(p.body)) break;
+    }
+    const last = polls[polls.length - 1];
+    return {
+      loggedIn: true, securityStatus: sec.status, proxyUrl, hiddenParams: hiddens,
+      bridged: bridged(last?.body), connect, polls,
+    };
   })
 );
 
