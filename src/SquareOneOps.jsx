@@ -120,7 +120,7 @@ const MOCK_ELC = {
   unreadMessages: 4,
 };
 
-export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}) {
+export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, onSignOut } = {}) {
   const [tab, setTab] = useState("home");
   const [prefs, setPrefs] = usePrefs(); // per-user UI prefs (camera wall layout, …)
 
@@ -232,10 +232,18 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
   const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
   const pageTitle = (TABS.find(([id]) => id === tab) || [, "Home"])[1];
 
-  // Visible tabs: Home and Settings are always available; the rest can be turned
-  // off per user (by the person or by an admin) via prefs.tabs.
+  // Visible tabs. Home + Settings always show. Admins see everything. For
+  // manager/staff, a tab is on unless: the role's bucket turns it off
+  // (roleTabs[role]) — or the person's own override does (prefs.tabs, which wins).
   const tabPrefs = prefs.tabs || {};
-  const visibleTabs = TABS.filter(([id]) => id === "home" || id === "settings" || tabPrefs[id] !== false);
+  const roleBucket = role && role !== "admin" ? (roleTabs[role] || {}) : {};
+  const tabVisible = (id) => {
+    if (id === "home" || id === "settings") return true;
+    if (role === "admin" || !authEnabled) return true;
+    if (tabPrefs[id] !== undefined) return tabPrefs[id] !== false; // per-person override wins
+    return roleBucket[id] !== false;                                // else the role bucket
+  };
+  const visibleTabs = TABS.filter(([id]) => tabVisible(id));
   useEffect(() => {
     if (!visibleTabs.some(([id]) => id === tab)) setTab("home");
   }, [tabPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -509,27 +517,32 @@ function MyTabsPanel({ tabPrefs, onTabPrefs }) {
   );
 }
 
-// Team — admin: create logins, set role, control each user's visible tabs.
+// Team — admin: authorize Microsoft accounts (invite by email + role), manage
+// active users, and set which tabs each role sees. No passwords: everyone signs
+// in with Microsoft, so this is pure authorization.
 function TeamPanel() {
-  const [users, setUsers] = useState(null);
+  const [data, setData] = useState(null);   // { users, invites, roleTabs }
   const [expanded, setExpanded] = useState(null);
-  const [form, setForm] = useState({ email: "", password: "", role: "staff" });
+  const [form, setForm] = useState({ email: "", role: "staff" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
   const load = useCallback(() => {
-    apiFetch("/api/admin/users").then((r) => r.json()).then((j) => { if (j.ok) setUsers(j.data); }).catch(() => {});
+    apiFetch("/api/admin/users").then((r) => r.json()).then((j) => { if (j.ok) setData(j.data); }).catch(() => {});
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const create = async () => {
+  const invite = async () => {
     setBusy(true); setMsg(null);
     try {
-      const r = await apiFetch("/api/admin/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then((res) => res.json());
-      if (!r.ok) throw new Error(r.message || "Could not create user");
-      setForm({ email: "", password: "", role: "staff" }); setMsg({ ok: true, text: `Created ${r.data.email}` }); load();
+      const r = await apiFetch("/api/admin/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then((res) => res.json());
+      if (!r.ok) throw new Error(r.message || "Could not add");
+      setForm({ email: "", role: "staff" });
+      setMsg({ ok: true, text: r.data.status === "active" ? `${r.data.email} already had an account — role set to ${r.data.role}.` : `Invited ${r.data.email} as ${r.data.role}. They'll get access next time they sign in with Microsoft.` });
+      load();
     } catch (e) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
   };
+  const cancelInvite = async (email) => { await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}`, { method: "DELETE" }); load(); };
   const setRole = async (id, role) => { await apiFetch(`/api/admin/users/${id}/role`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }); load(); };
   const setUserTab = async (u, id, on) => {
     const tabs = { ...(u.tabs || {}), [id]: on };
@@ -537,31 +550,61 @@ function TeamPanel() {
     load();
   };
   const remove = async (u) => {
-    if (!window.confirm(`Remove ${u.email}? This deletes their login.`)) return;
+    if (!window.confirm(`Remove ${u.email}? They lose access immediately.`)) return;
     await apiFetch(`/api/admin/users/${u.id}`, { method: "DELETE" }); load();
   };
+  const setRoleBucket = async (role, id, on) => {
+    const tabs = { ...((data?.roleTabs || {})[role] || {}), [id]: on };
+    setData((d) => ({ ...d, roleTabs: { ...(d?.roleTabs || {}), [role]: tabs } })); // optimistic
+    await apiFetch("/api/admin/role-tabs", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role, tabs }) });
+    load();
+  };
+
+  const users = data?.users, invites = data?.invites || [], roleTabs = data?.roleTabs || {};
+  const RolePicker = (value, onChange) => (
+    <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, padding: "6px 8px", cursor: "pointer" }}>
+      <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
+    </select>
+  );
 
   return (
     <Panel title="Team" accent={C.navy} right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>admin</span>}>
-      {/* Create login */}
+      {/* Add a person — everyone signs in with Microsoft, so this authorizes an email. */}
       <div style={{ padding: "4px 0 14px", borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 8 }}>Create a login</div>
-        <div className="grid gap-2" style={{ gridTemplateColumns: "1.4fr 1fr auto auto" }}>
-          <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="email@squareonecompassion.com" style={inputStyle} />
-          <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Temp password (8+ chars)" style={inputStyle} />
-          <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} style={{ ...inputStyle, cursor: "pointer" }}>
-            <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
-          </select>
-          <button onClick={create} disabled={busy || !form.email || form.password.length < 8}
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>Add a person</div>
+        <div style={{ fontSize: 12, color: C.mid, marginBottom: 8, lineHeight: 1.5 }}>
+          Enter their SquareOne Microsoft email and role. They get access automatically the next time they sign in — no password to set.
+        </div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "1.6fr 1fr auto" }}>
+          <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="name@squareonecompassion.com" style={inputStyle} />
+          {RolePicker(form.role, (role) => setForm({ ...form, role }))}
+          <button onClick={invite} disabled={busy || !form.email}
             style={{ padding: "0 16px", borderRadius: 7, border: "none", cursor: "pointer", background: C.cyan, color: "#fff", fontWeight: 700, fontSize: 13 }}>
-            {busy ? <Loader2 size={14} className="spin" /> : "Create"}
+            {busy ? <Loader2 size={14} className="spin" /> : "Add"}
           </button>
         </div>
         {msg && <div style={{ marginTop: 8, fontSize: 12, fontFamily: mono, color: msg.ok ? C.go : C.red }}>{msg.text}</div>}
       </div>
 
-      {/* User list */}
-      {!users && <div style={{ padding: "10px 0", color: C.dim, fontFamily: mono, fontSize: 12.5 }}>Loading…</div>}
+      {/* Pending invites */}
+      {invites.length > 0 && (
+        <div style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Invited · waiting for first sign-in</div>
+          {invites.map((iv) => (
+            <div key={iv.email} className="flex items-center justify-between" style={{ padding: "7px 0", fontSize: 13.5 }}>
+              <span className="flex items-center gap-2"><Loader2 size={12} color={C.amber} /> {iv.email}</span>
+              <span className="flex items-center gap-2">
+                <span style={{ fontSize: 11, fontFamily: mono, color: C.amber, textTransform: "uppercase" }}>{iv.role}</span>
+                <button onClick={() => cancelInvite(iv.email)} className="so-btn" title="Cancel invite" style={{ padding: "5px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={12} /></button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Active users */}
+      {!data && <div style={{ padding: "10px 0", color: C.dim, fontFamily: mono, fontSize: 12.5 }}>Loading…</div>}
+      {users?.length === 0 && invites.length === 0 && <Empty text="No one added yet. Add a person above." />}
       {users?.map((u) => (
         <div key={u.id} style={{ padding: "11px 0", borderBottom: `1px solid ${C.border}` }}>
           <div className="flex items-center justify-between gap-3">
@@ -572,28 +615,53 @@ function TeamPanel() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <select value={u.role || "staff"} onChange={(e) => setRole(u.id, e.target.value)} style={{ ...inputStyle, padding: "6px 8px", cursor: "pointer" }}>
-                <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
-              </select>
+              {RolePicker(u.role || "staff", (role) => setRole(u.id, role))}
               <button onClick={() => setExpanded(expanded === u.id ? null : u.id)} className="so-btn" style={{ padding: "6px 11px", borderRadius: 7, fontSize: 12, color: C.mid }}>Tabs</button>
               <button onClick={() => remove(u)} className="so-btn" title="Remove" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
             </div>
           </div>
           {expanded === u.id && (
-            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", marginTop: 10, padding: "10px 12px", background: C.panel2, borderRadius: 8 }}>
+            <div style={{ marginTop: 10, padding: "10px 12px", background: C.panel2, borderRadius: 8 }}>
+              <div style={{ fontSize: 11.5, color: C.mid, marginBottom: 8 }}>Per-person override (leave as-is to use the role's defaults below):</div>
+              <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" }}>
+                {TOGGLEABLE_TABS.map(([id, label, Icon]) => {
+                  const on = (u.tabs || {})[id] !== false;
+                  return (
+                    <label key={id} className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer", color: C.text }}>
+                      <input type="checkbox" checked={on} onChange={() => setUserTab(u, id, !on)} />
+                      <Icon size={13} color={C.mid} />{label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {/* Role buckets */}
+      <div style={{ paddingTop: 14 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>What each role can see</div>
+        <div style={{ fontSize: 12, color: C.mid, marginBottom: 10, lineHeight: 1.5 }}>
+          Turn tabs on or off for everyone with that role. (Admins always see everything. A per-person override above wins over these.)
+        </div>
+        {["manager", "staff"].map((r) => (
+          <div key={r} style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{r}</div>
+            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" }}>
               {TOGGLEABLE_TABS.map(([id, label, Icon]) => {
-                const on = (u.tabs || {})[id] !== false;
+                const on = (roleTabs[r] || {})[id] !== false;
                 return (
                   <label key={id} className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer", color: C.text }}>
-                    <input type="checkbox" checked={on} onChange={() => setUserTab(u, id, !on)} />
+                    <input type="checkbox" checked={on} onChange={() => setRoleBucket(r, id, !on)} />
                     <Icon size={13} color={C.mid} />{label}
                   </label>
                 );
               })}
             </div>
-          )}
-        </div>
-      ))}
+          </div>
+        ))}
+      </div>
     </Panel>
   );
 }

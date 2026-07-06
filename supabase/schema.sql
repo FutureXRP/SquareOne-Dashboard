@@ -118,6 +118,33 @@ create table if not exists user_prefs (
 );
 
 -- ---------------------------------------------------------------------------
+-- Invites — pre-authorized access. Since everyone signs in with Microsoft
+-- (Supabase auto-creates the auth user on first login), admins don't create
+-- accounts; they authorize an EMAIL with a role ahead of time. On first sign-in
+-- the server matches the email to an invite, grants the role, and claims it.
+-- Uninvited accounts get no access. SERVICE-ROLE ONLY.
+-- ---------------------------------------------------------------------------
+create table if not exists invites (
+  email       text primary key,                 -- lower-cased work email
+  role        app_role not null default 'staff',
+  tabs        jsonb,                             -- optional per-person tab override
+  invited_by  uuid references auth.users(id) on delete set null,
+  created_at  timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
+-- App-wide settings (key/value). Holds the role-based tab "buckets" under key
+-- 'role_tabs': { "manager": {"members":false,...}, "staff": {...} }. A tab is
+-- visible for a role unless explicitly set false here (per-person overrides in
+-- user_prefs.tabs win over this). SERVICE-ROLE ONLY.
+-- ---------------------------------------------------------------------------
+create table if not exists app_settings (
+  key         text primary key,
+  value       jsonb not null default '{}'::jsonb,
+  updated_at  timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location
 -- ---------------------------------------------------------------------------
 create or replace function role_at(loc uuid)
@@ -157,6 +184,8 @@ alter table okdhs_imports       enable row level security;
 alter table token_cache         enable row level security;  -- no policies = service-role only
 alter table user_credentials    enable row level security;  -- no policies = service-role only
 alter table user_prefs          enable row level security;  -- no policies = service-role only
+alter table invites             enable row level security;  -- no policies = service-role only
+alter table app_settings        enable row level security;  -- no policies = service-role only
 
 -- Profiles: a user sees/edits their own; admins see all.
 create policy profiles_self on profiles

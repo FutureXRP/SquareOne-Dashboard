@@ -48,6 +48,23 @@ export async function requireAdmin(req, res, next) {
   }
 }
 
+// Emails that are always admins, regardless of the invites/user_locations table.
+// A bootstrap so the owner can never be locked out of the invite-only system.
+// Set ADMIN_EMAILS="matt@squareonecompassion.com,justin@squareonecompassion.com".
+export const ADMIN_EMAILS = new Set(
+  (process.env.ADMIN_EMAILS || "")
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+);
+
+// The default location's id, creating it on first use. Access grants
+// (user_locations) hang off a location; single-site installs just use this one.
+export async function firstLocationId() {
+  const { data } = await supabaseAdmin.from("locations").select("id").order("created_at").limit(1).maybeSingle();
+  if (data?.id) return data.id;
+  const { data: made } = await supabaseAdmin.from("locations").insert({ name: "SquareOne Compassion" }).select("id").single();
+  return made.id;
+}
+
 // Best-effort audit entry. Never throws into the request path.
 export async function logAudit(req, action, target, detail) {
   if (!authEnabled || !req?.user) return;
