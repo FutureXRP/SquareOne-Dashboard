@@ -399,6 +399,8 @@ const PROBES = [
   { key: "geovision-login", label: "GV-Access Login Test (deep)", path: "/api/geovision/login-probe" },
   { key: "geovision-discover", label: "GV-Access Discover Doors", path: "/api/geovision/discover" },
   { key: "geovision-doors", label: "GV-Access Find Door API", path: "/api/geovision/probe-doors" },
+  { key: "geovision-monitor", label: "GV-Access Map Doors (ids → names)", path: "/api/geovision/monitor" },
+  { key: "geovision-unlock", label: "GV-Access Test Unlock (ctrl 1 / door 4)", path: "/api/geovision/test-unlock?ctrl=1&door=4" },
   { key: "napco", label: "Gemini Alarm", path: "/api/napco/debug" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
@@ -972,7 +974,84 @@ function Security({ doors, alarm, hub, lockdown }) {
           </div>
         ))}
       </Panel>
+
+      <GeoVisionDoors />
     </div>
+  );
+}
+
+// Live GV-Access door control. Reads the configured doors (GV_DOORS) and sends
+// real UNLOCK_DOOR / LOCK_DOOR commands to the on-prem GV-ASManager server,
+// attributed to the signed-in operator. Momentary unlock is how GeoVision access
+// control works, so a door "unlock" pulses the strike open — there's no held
+// lock/unlock state to reflect, just the last action.
+function GeoVisionDoors() {
+  const [doors, setDoors] = useState(null);   // null = loading, [] = none configured
+  const [busy, setBusy] = useState(null);
+  const [result, setResult] = useState({});   // door key -> {ok, at}
+
+  useEffect(() => {
+    apiFetch("/api/geovision/doors").then((r) => r.json())
+      .then((r) => setDoors(r.ok && Array.isArray(r.data?.doors) ? r.data.doors : []))
+      .catch(() => setDoors([]));
+  }, []);
+
+  const send = async (d, op) => {
+    const key = `${d.ctrl}/${d.door}`;
+    setBusy(`${key}:${op}`);
+    try {
+      const r = await apiFetch(`/api/geovision/doors/${op}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ctrl: d.ctrl, door: d.door }),
+      }).then((res) => res.json());
+      const ok = r.ok && r.data?.ok;
+      setResult((s) => ({ ...s, [key]: { ok, op, msg: ok ? `${op === "unlock" ? "Unlocked" : "Locked"} just now` : (r.message || r.data?.response || "Command failed") } }));
+    } catch (e) {
+      setResult((s) => ({ ...s, [key]: { ok: false, op, msg: e.message } }));
+    } finally { setBusy(null); }
+  };
+
+  if (doors === null)
+    return <Panel title="GV-Access Doors (live)" accent={C.cyan}><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13 }}><Loader2 size={14} className="spin" /> Loading doors…</div></Panel>;
+
+  return (
+    <Panel title="GV-Access Doors (live)" accent={C.cyan}
+      right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>real hardware</span>}>
+      {doors.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.5 }}>
+          No doors configured yet. An admin sets the <code style={{ fontFamily: mono, color: C.text }}>GV_DOORS</code> environment
+          variable to a JSON list like <code style={{ fontFamily: mono, color: C.text }}>{`[{"name":"Front Door","ctrl":1,"door":4}]`}</code>.
+          Use <strong style={{ color: C.text }}>Settings → Diagnostics → GV-Access Map Doors</strong> to look up the controller and door ids.
+        </div>
+      ) : doors.map((d) => {
+        const key = `${d.ctrl}/${d.door}`;
+        const res = result[key];
+        return (
+          <div key={key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div className="flex items-center justify-between" style={{ gap: 10 }}>
+              <span className="flex items-center gap-2" style={{ fontSize: 14.5 }}>
+                <DoorOpen size={15} color={C.cyan} />{d.name}
+              </span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => send(d, "unlock")} disabled={busy} className="so-btn flex items-center gap-1.5"
+                  style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 92, color: C.cyan, borderColor: C.cyan }}>
+                  {busy === `${key}:unlock` ? <Loader2 size={13} className="spin" /> : <Unlock size={13} />} Unlock
+                </button>
+                <button onClick={() => send(d, "lock")} disabled={busy} className="so-btn flex items-center gap-1.5"
+                  style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 80, color: C.go, borderColor: C.border }}>
+                  {busy === `${key}:lock` ? <Loader2 size={13} className="spin" /> : <Lock size={13} />} Lock
+                </button>
+              </div>
+            </div>
+            {res && (
+              <div style={{ marginTop: 6, fontSize: 12, fontFamily: mono, color: res.ok ? C.go : C.red }}>
+                {res.ok ? "✓ " : "✕ "}{res.msg}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </Panel>
   );
 }
 

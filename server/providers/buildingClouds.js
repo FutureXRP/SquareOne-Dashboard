@@ -1,6 +1,7 @@
+import crypto from "node:crypto";
 import { Router } from "express";
 import { config, guard } from "../config.js";
-import { requireAdmin } from "../auth.js";
+import { requireAdmin, requireAuth, logAudit } from "../auth.js";
 import { credsFor } from "./userCreds.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
 
@@ -47,6 +48,39 @@ async function gvGet(path, cookie) {
   const c = config.geovision;
   return fetch(`${c.baseUrl}${path}`, { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(9000) });
 }
+
+/*
+  ASWeb command endpoint. CONFIRMED from a captured browser request:
+    POST /ASWeb/bin/ControllerList.srf  (form-encoded, with the session cookie)
+    door open -> action=DOOR_OPERATION&module=monitor&dvg_id=0
+                 &ctrl_id=<controller>&dr_id=<door>&operation=UNLOCK_DOOR&client_guid=<guid>
+  Everything (door ops, logs, tree) posts to this one handler with a different
+  `action`. We re-login and retry once if the session lapsed.
+*/
+const GV_CLIENT_GUID = crypto.randomUUID().toUpperCase();
+
+async function gvCommand(fields, retry = true) {
+  const c = config.geovision;
+  const send = (cookie) => fetch(`${c.baseUrl}/ASWeb/bin/ControllerList.srf`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      Cookie: cookie, Accept: "*/*", "X-Requested-With": "XMLHttpRequest",
+      Referer: `${c.baseUrl}/ASWeb/ASWeb.srf`, Origin: c.baseUrl,
+    },
+    body: new URLSearchParams({ client_guid: GV_CLIENT_GUID, ...fields }).toString(),
+    redirect: "manual", signal: AbortSignal.timeout(12000),
+  });
+  let res = await send(await gvLogin());
+  if ((res.status === 302 || res.status === 401 || res.status === 403) && retry) {
+    res = await send(await gvLogin(true)); // session expired — re-login once
+  }
+  return { status: res.status, text: await res.text() };
+}
+
+// Unlock / lock a door by controller id + door id.
+const gvDoorOp = (ctrlId, drId, operation) =>
+  gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation });
 
 /*
   Building-system cloud providers: Pro1 thermostats, Napco alarm (iBridge/Prima),
@@ -363,5 +397,63 @@ geovisionRouter.get(
     }
 
     return { loggedIn: true, base, results: results.slice(0, 20), mobile };
+  })
+);
+
+// Discover the controller/door tree so we can map dr_id -> name. The Monitor
+// panel loads it from the same ControllerList.srf handler; try the likely list
+// actions and return whatever comes back.
+geovisionRouter.get(
+  "/monitor",
+  requireAdmin,
+  guard("geovision", async () => {
+    const actions = [
+      "GET_CONTROLLERS", "GET_CONTROLLER_LIST", "GET_MONITOR_DATA", "GET_MONITOR_TREE",
+      "GET_DEVICE_LIST", "GET_DEVICE_GROUPS", "GET_DOORS", "GET_TREE", "INIT_MONITOR",
+    ];
+    const out = [];
+    for (const action of actions) {
+      const r = await gvCommand({ action, module: "monitor" });
+      out.push({ action, status: r.status, len: r.text.length, body: r.text.slice(0, 700).replace(/[A-Za-z0-9+/=_-]{40,}/g, "…") });
+    }
+    // Most useful first: a 200 with real content.
+    out.sort((a, b) => ((a.status === 200 && a.len > 5) ? 0 : 1) - ((b.status === 200 && b.len > 5) ? 0 : 1));
+    return { base: config.geovision.baseUrl, actions: out };
+  })
+);
+
+// Configured doors (GV_DOORS env: [{"name","ctrl","door"}]) for the Security tab.
+geovisionRouter.get(
+  "/doors",
+  requireAuth,
+  guard("geovision", async () => ({ doors: config.geovision.doors })),
+);
+
+// Unlock / lock a specific door. Body/params: ctrl (controller id), door (dr_id).
+// op path segment: "unlock" | "lock". Attributed to the signed-in user.
+geovisionRouter.post(
+  "/doors/:op",
+  requireAuth,
+  guard("geovision", async (req) => {
+    const op = req.params.op === "lock" ? "LOCK_DOOR" : "UNLOCK_DOOR";
+    const ctrl = Number(req.body?.ctrl);
+    const door = Number(req.body?.door);
+    if (!Number.isFinite(ctrl) || !Number.isFinite(door)) throw new Error("ctrl and door are required.");
+    const r = await gvDoorOp(ctrl, door, op);
+    logAudit(req, `geovision.${req.params.op}`, `ctrl${ctrl}/door${door}`, { status: r.status });
+    return { ok: r.status === 200, status: r.status, response: r.text.slice(0, 200) };
+  })
+);
+
+// Admin one-off unlock test (GET so it's easy to fire from Diagnostics):
+// /api/geovision/test-unlock?ctrl=1&door=4  — ACTUALLY opens that door.
+geovisionRouter.get(
+  "/test-unlock",
+  requireAdmin,
+  guard("geovision", async (req) => {
+    const ctrl = Number(req.query.ctrl ?? 1);
+    const door = Number(req.query.door ?? 4);
+    const r = await gvDoorOp(ctrl, door, "UNLOCK_DOOR");
+    return { sent: { ctrl, door, operation: "UNLOCK_DOOR" }, status: r.status, response: r.text.slice(0, 300) };
   })
 );
