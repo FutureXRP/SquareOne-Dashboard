@@ -387,6 +387,53 @@ napcoRouter.get(
   })
 );
 
+// Admin: map the DSS command codes. Logs in, reads Default.aspx (+ its inline JS
+// and referenced scripts) and extracts every DSS.aspx CommandText reference plus
+// the code around arm/disarm/status, so we learn which number arms/disarms/reads.
+napcoRouter.get(
+  "/commands",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    if (!login.ok) return { loggedIn: false, status: login.status, location: login.location };
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const r = await fetch(`${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+        return { status: r.status, text: await r.text() };
+      } catch (e) { return { error: e.message }; }
+    };
+    const home = await get("/Default.aspx");
+    const html = home.text || "";
+
+    // Every DSS command URL the page builds (CommandText=<n>[&PageName=..&Params=..]).
+    const commands = [...new Set((html.match(/CommandText=\d+[^"'`\s<>\\]*/gi) || []))].slice(0, 80);
+    // Code windows around the arm/disarm/status keywords so the mapping is readable.
+    const contexts = [];
+    for (const kw of ["disarm", "armstay", "armaway", "\\barm", "stay", "away", "GetStatus", "panelStatus", "CommandText", "DSS.aspx", "Params="]) {
+      const i = html.search(new RegExp(kw, "i"));
+      if (i >= 0) contexts.push({ kw: kw.replace(/\\\\?b/g, ""), text: redact(html.slice(Math.max(0, i - 220), i + 380)) });
+    }
+    // Same-origin scripts referenced by the page (skip jquery/CDN) — scan each for commands.
+    const scripts = [...new Set([...html.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]))]
+      .filter((s) => !/jquery|googleapis|\/\//.test(s)).slice(0, 12);
+    const scriptScan = [];
+    for (const s of scripts) {
+      const path = s.startsWith("/") ? s : `/${s.replace(/^\.?\//, "")}`;
+      const r = await get(path);
+      if (r.status === 200) {
+        const cmds = [...new Set((r.text.match(/CommandText['"=:\s]*\d+/gi) || []))].slice(0, 40);
+        const armI = r.text.search(/disarm|arm/i);
+        scriptScan.push({ src: path, len: r.text.length, commandRefs: cmds, armCtx: armI >= 0 ? redact(r.text.slice(Math.max(0, armI - 200), armI + 400)) : null });
+      } else scriptScan.push({ src: path, status: r.status });
+    }
+    return { loggedIn: true, homeStatus: home.status, commands, contexts, scripts, scriptScan };
+  })
+);
+
 // GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
 // hosts to guess: the app talks to one server address, which the owner supplies.
 export const geovisionRouter = makeProbeRouter("geovision");
