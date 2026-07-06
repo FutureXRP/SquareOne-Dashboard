@@ -20,3 +20,11 @@ export async function apiJson(path, opts) {
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   return res.json();
 }
+
+// The current session token, for URLs that can't carry an Authorization header
+// (e.g. the HLS <video>/hls.js requests, which pass ?access_token= instead).
+export async function authToken() {
+  if (!supabaseEnabled) return "";
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token || "";
+}
