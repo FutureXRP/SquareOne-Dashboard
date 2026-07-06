@@ -358,6 +358,46 @@ async function napcoSession(username, password, force = false) {
   return { cookie: login.cookie, fresh: true };
 }
 
+// Map the Napco panel <Status> number to a human state. Confirmed live:
+//   0 = Disarmed (read while the building was occupied and the panel was off).
+// The armed codes are confirmed the first time the panel is armed at night; until
+// then any non-zero value reads as "armed" (raw number surfaced for mapping).
+function napcoStateLabel(raw) {
+  if (raw === undefined || raw === null || raw === "") return { state: "unknown", armed: null };
+  const n = Number(raw);
+  if (n === 0) return { state: "disarmed", armed: false };
+  // Best-known Gemini/iBridge mapping; refined once the armed reading lands.
+  const map = { 1: "armed-stay", 2: "armed-away", 3: "armed-instant", 4: "armed-max" };
+  return { state: map[n] || "armed", armed: true, raw: n };
+}
+
+// Read-only live panel status via the iBridge DSS bridge. Reuses the cached
+// session; only opens the bridge (CommandText=23) on a brand-new session, then
+// polls status (26) until BridgedWithRCM=1. No arm/disarm — safe on a live panel.
+async function napcoReadStatus(username, password) {
+  const c = config.napco;
+  const { cookie, fresh } = await napcoSession(username, password);
+  if (!cookie) return { loggedIn: false, bridged: false, statusRaw: undefined };
+  const dss = async (cmd, params = "") => {
+    try {
+      const r = await fetch(`${c.baseUrl}/DSS.aspx?CommandText=${encodeURIComponent(cmd)}&PageName=SSS2&Params=${encodeURIComponent(params)}`,
+        { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+      return await r.text();
+    } catch { return ""; }
+  };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const bridged = (b) => /<BridgedWithRCM>\s*1\s*<\/BridgedWithRCM>/i.test(b || "");
+  const statusOf = (b) => (b?.match(/<Status>\s*(\d+)\s*<\/Status>/i) || [])[1];
+  if (fresh) await dss("23", "");
+  let body = "";
+  for (let i = 0; i < 7; i++) {
+    await wait(800);
+    body = await dss("26", "");
+    if (bridged(body)) break;
+  }
+  return { loggedIn: true, freshSession: fresh, bridged: bridged(body), statusRaw: statusOf(body) };
+}
+
 // Admin: verify the iBridge Online login and map the arm/disarm surface. Logs in,
 // then pulls the authenticated home + NapcoSite.js + DSS.aspx to find the command
 // endpoint/params. Credentials come from the operator's vault or NAPCO_ env vars.
@@ -479,6 +519,94 @@ napcoRouter.get(
       bridged: bridged(last?.body), status: statusOf(last?.body),
       hint: bridged(last?.body) ? "bridged — Status is the live panel state" : "not bridged yet — run again in a few seconds (session is cached, bridge keeps linking)",
       connect, polls,
+    };
+  })
+);
+
+// Dashboard-facing live alarm status. Clean shape for the Home + Security cards:
+// { configured, loggedIn, bridged, state, armed, statusRaw }. Read-only.
+napcoRouter.get(
+  "/alarm",
+  requireAuth,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    if (!c.username || !c.password) return { configured: false };
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const s = await napcoReadStatus(username || c.username, secret || c.password);
+    if (!s.loggedIn) return { configured: true, loggedIn: false };
+    const { state, armed } = napcoStateLabel(s.statusRaw);
+    return {
+      configured: true, loggedIn: true, bridged: s.bridged,
+      statusRaw: s.statusRaw, state, armed,
+      hint: s.bridged ? undefined : "bridge still linking — reads settle within a few seconds",
+    };
+  })
+);
+
+// Admin: discover the thermostat / Z-Wave control surface on the SAME iBridge
+// cloud we already log into for the alarm. The IBR-ZREMOTE-W module carries
+// Z-Wave, so the Pro1 thermostats are very likely reachable here (via
+// ClimateControlScreen.aspx / a Z-Wave device page) — no mobile capture needed.
+// READ-ONLY: crawls pages + scripts, extracts device names, setpoint controls,
+// and any DSS CommandText the climate/automation pages build. No writes.
+napcoRouter.get(
+  "/climate",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const { cookie } = await napcoSession(username || c.username, secret || c.password);
+    if (!cookie) return { loggedIn: false };
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const r = await fetch(/^https?:/i.test(path) ? path : `${c.baseUrl}${path}`, { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+        return { status: r.status, text: await r.text() };
+      } catch (e) { return { error: e.message }; }
+    };
+
+    // Find every same-origin link/script the home page exposes, then keep the
+    // climate/thermostat/Z-Wave/automation ones so we crawl what actually exists.
+    const home = await get("/Default.aspx");
+    const homeHtml = home.text || "";
+    const rel = /climate|thermostat|zwave|z-wave|automation|hvac|temp|heat|cool/i;
+    const linked = [...new Set([
+      ...[...homeHtml.matchAll(/<a[^>]+href=["']([^"']+\.aspx[^"']*)["']/gi)].map((m) => m[1]),
+      ...[...homeHtml.matchAll(/["']([\w./-]+\.aspx)["']/gi)].map((m) => m[1]),
+    ])].filter((h) => rel.test(h) && !/^https?:\/\//i.test(h)).slice(0, 12);
+
+    // Candidate pages by the Napco naming convention (crawl in addition to links).
+    const candidates = [...new Set([
+      "/ClimateControlScreen.aspx", "/Climate.aspx", "/Thermostat.aspx",
+      "/ZWave.aspx", "/ZWaveDevices.aspx", "/Automation.aspx", "/HVAC.aspx",
+      ...linked.map((h) => (h.startsWith("/") ? h : `/${h.replace(/^\.\//, "")}`)),
+    ])];
+
+    // Pull setpoint controls, device labels, and any DSS command the page builds.
+    const scan = (t) => ({
+      len: t.length,
+      commands: [...new Set((t.match(/CommandText=\d+[^"'`\s<>\\]*/gi) || []))].slice(0, 40),
+      // Named controls (dropdowns / setpoint fields / device rows).
+      controls: [...new Set([...t.matchAll(/id=["']([\w$]*(?:temp|setpoint|thermo|climate|zwave|heat|cool|mode|device)[\w$]*)["']/gi)].map((m) => m[1]))].slice(0, 40),
+      // Human-readable device names (e.g. thermostat labels) if the page lists them.
+      names: [...new Set([...t.matchAll(/>([^<>{}]{3,40}(?:thermostat|therm|temp|hvac|zone|climate)[^<>{}]{0,30})</gi)].map((m) => m[1].trim()))].slice(0, 20),
+      // Same-origin scripts to inspect next.
+      scripts: [...new Set([...t.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]))].filter((s) => !/jquery|googleapis|\/\//.test(s) && rel.test(s)).slice(0, 8),
+    });
+
+    const pages = {};
+    for (const path of candidates) {
+      const r = await get(path);
+      if (r.error) { pages[path] = { error: r.error }; continue; }
+      if (r.status !== 200) { pages[path] = { status: r.status }; continue; }
+      pages[path] = { status: 200, ...scan(r.text) };
+    }
+    return {
+      loggedIn: true,
+      homeLinks: linked,
+      pages,
+      hint: "any page returning 200 with climate/setpoint controls is where the Pro1s live on the iBridge cloud",
     };
   })
 );
