@@ -279,6 +279,14 @@ hikRouter.get(
     const url = String(req.query.u || "");
     const upstream = await hlsFetch(url);
     const text = await upstream.text();
+    // EZVIZ hands back an "error playlist" (segments named ErrCode/NNNN_*.ts) when
+    // the stream can't start. Fail once here instead of letting hls.js chase a
+    // dozen doomed segment fetches (which is the wall of 502s in the console).
+    if (!upstream.ok || /ErrCode/i.test(text) || !/#EXTINF/i.test(text)) {
+      const code = (text.match(/ErrCode\/(\d+)/i) || [])[1];
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(502).type("text/plain").send(`stream not available${code ? ` (EZVIZ ${code})` : ""}`);
+    }
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Cache-Control", "no-store");
     res.send(rewriteM3u8(text, url, req.query.access_token));
@@ -291,6 +299,7 @@ hikRouter.get(
   guard("hik", async (req, res) => {
     const url = String(req.query.u || "");
     const upstream = await hlsFetch(url);
+    if (!upstream.ok) { res.setHeader("Cache-Control", "no-store"); return res.status(502).end(); }
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp2t");
     res.setHeader("Cache-Control", "no-store");
@@ -326,10 +335,27 @@ hikRouter.get(
       const { deviceSerial, channelNo } = parseCamId(id);
       const capture = await call("/api/lapp/device/capture", { accessToken, deviceSerial, channelNo, code: codeFor(deviceSerial) });
       const live = await call("/api/lapp/live/address/get", { accessToken, deviceSerial, channelNo, protocol: 2, quality: 1, code: codeFor(deviceSerial) });
+      // Actually pull the HLS playlist EZVIZ minted, to see whether it's a real
+      // stream or an error playlist (and surface the ErrCode, e.g. 6106).
+      let playlist = null;
+      if (live.data?.url) {
+        try {
+          const pl = await fetch(live.data.url, { signal: AbortSignal.timeout(9000) });
+          const body = await pl.text();
+          playlist = {
+            status: pl.status,
+            isError: /ErrCode/i.test(body),
+            errCode: (body.match(/ErrCode\/(\d+)/i) || [])[1] || null,
+            segments: (body.match(/#EXTINF/gi) || []).length,
+            head: body.replace(/[A-Za-z0-9%_-]{40,}/g, "…").slice(0, 300),
+          };
+        } catch (e) { playlist = { error: e.message }; }
+      }
       results.push({
         id, deviceSerial, channelNo,
         capture: { code: capture.code, msg: capture.msg, hasPic: Boolean(capture.data?.picUrl), error: capture.error },
-        live: { code: live.code, msg: live.msg, hasUrl: Boolean(live.data?.url), urlHead: live.data?.url ? String(live.data.url).slice(0, 40) : null, error: live.error },
+        live: { code: live.code, msg: live.msg, hasUrl: Boolean(live.data?.url), error: live.error },
+        playlist,
       });
     }
     return { results };
