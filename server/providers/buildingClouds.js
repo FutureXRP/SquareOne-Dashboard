@@ -805,6 +805,39 @@ geovisionRouter.get(
   })
 );
 
+// Extract the door-operation constants (the values passed as operation:) so the
+// app's full door menu — Unlock / Force Unlock / Force Lock / Release / Lock Down
+// — can be wired with the EXACT strings the controller expects.
+geovisionRouter.get(
+  "/door-ops",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true);
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const r = await gvGet("/ASWeb/modules/LiveLog/LiveLog.js", cookie);
+    const t = await r.text();
+    if (r.status !== 200 || t.length < 100) return { status: r.status, len: t.length };
+
+    // Operation constants look like FORCE_UNLOCK / LOCK_DOWN / RELEASE_DOOR.
+    const ops = [...new Set(t.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*(?:UNLOCK|LOCK|RELEASE|LOCKDOWN|DOWN|NORMAL|RESUME|OPEN|GRANT)[A-Z0-9_]*\b/g) || [])]
+      .filter((s) => s.length <= 40 && !/^(?:UNLOCKED|LOCKED)$/.test(s)).sort();
+    // The door context menu ties each label to its operation; grab those windows.
+    const ctxOf = (re, span = 260, max = 4) => {
+      const out = []; let m; const g = new RegExp(re, "g");
+      while ((m = g.exec(t)) && out.length < max) out.push(redact(t.slice(Math.max(0, m.index - span), m.index + span)));
+      return out;
+    };
+    return {
+      status: r.status,
+      operationConstants: ops,
+      doorOperationCtx: ctxOf("doorOperation\\s*[:=]"),
+      forceCtx: ctxOf("FORCE_(?:UN)?LOCK"),
+      lockDownCtx: ctxOf("LOCK_?DOWN"),
+      releaseCtx: ctxOf("RELEASE|RESUME|NORMAL_DOOR"),
+    };
+  })
+);
+
 // Deep-scan LiveLog.js (the live-monitor module) for the CLIENT_GUID origin:
 // GET_ALL_DEVICES uses an already-registered guid, so an earlier connect/register
 // action mints it. Dump every action:/module: value it uses and the code around
