@@ -12,7 +12,7 @@ import { usePrefs } from "./usePrefs.js";
 // Compact currency, e.g. 1575 -> "$1,575". Non-numbers pass through as "$0".
 const fmtMoney = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
 import { useDashboardData } from "./useDashboardData.js";
-import { apiFetch } from "./lib/api.js";
+import { apiFetch, authToken } from "./lib/api.js";
 import { useHub } from "./useHub.js";
 import { BrandLogo } from "./BrandLogo.jsx";
 // Lazy so hls.js (the bulk of the bundle) only loads when a live view is opened.
@@ -1834,9 +1834,9 @@ function runPoster(task) {
 // Grab a single frame from a camera's live HLS stream as a JPEG data URL. Uses
 // hls.js (MSE) rather than native HLS so the canvas isn't cross-origin tainted.
 async function grabLiveFrame(camId) {
-  const r = await apiFetch(`/api/hik/cameras/${camId}/live`).then((res) => res.json());
-  const url = r?.data?.url;
-  if (!url) throw new Error("no live url");
+  // Same-origin HLS proxy (avoids EZVIZ CORS); token in the query for hls.js.
+  const tok = await authToken();
+  const url = `/api/hik/cameras/${camId}/hls.m3u8${tok ? `?access_token=${encodeURIComponent(tok)}` : ""}`;
   const { default: Hls } = await import("hls.js");
   if (!Hls.isSupported()) throw new Error("hls unsupported");
   return new Promise((resolve, reject) => {

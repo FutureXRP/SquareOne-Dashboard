@@ -18,7 +18,9 @@ export const authEnabled = Boolean(supabaseAdmin);
 export async function requireAuth(req, res, next) {
   if (!authEnabled) return next(); // open mode
   const h = req.headers.authorization || "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+  // Header for normal API calls; ?access_token= for requests that can't set a
+  // header (the HLS <video>/hls.js stream fetches).
+  const token = (h.startsWith("Bearer ") ? h.slice(7) : "") || req.query.access_token || "";
   if (!token) return res.status(401).json({ ok: false, message: "Not signed in." });
   const { data, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !data?.user) return res.status(401).json({ ok: false, message: "Invalid or expired session." });

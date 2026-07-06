@@ -216,6 +216,88 @@ hikRouter.get(
   })
 );
 
+/*
+  ---- Same-origin HLS proxy ----
+  EZVIZ's HLS video servers don't send CORS headers, so the browser blocks
+  hls.js from fetching their .m3u8/.ts directly from the dashboard domain
+  (that's the "Access-Control-Allow-Origin ... Status code: 0" errors). We
+  proxy the whole stream through this server: the browser talks only to our
+  origin, and we fetch from EZVIZ server-to-server (where CORS doesn't apply),
+  rewriting the playlist so every child URL loops back through the proxy.
+*/
+const HLS_HOST_OK = (u) => {
+  try { return /(^|\.)(ezvizlife\.com|ezviz\.com|ys7\.com)$/i.test(new URL(u).hostname); }
+  catch { return false; }
+};
+
+// Rewrite an m3u8 so nested playlists and segments route back through us. The
+// session token rides along in the query, since hls.js/<video> can't set headers.
+function rewriteM3u8(text, baseUrl, token) {
+  const self = "/api/hik/hls";
+  const tok = token ? `&access_token=${encodeURIComponent(token)}` : "";
+  const abs = (uri) => { try { return new URL(uri, baseUrl).toString(); } catch { return uri; } };
+  const proxy = (uri) => `${self}/${/\.m3u8/i.test(uri) ? "play" : "seg"}?u=${encodeURIComponent(abs(uri))}${tok}`;
+  return text.split(/\r?\n/).map((line) => {
+    const t = line.trim();
+    if (!t) return line;
+    if (/^#EXT-X-(KEY|MEDIA|STREAM-INF|I-FRAME-STREAM-INF)/i.test(t))
+      return line.replace(/URI="([^"]+)"/i, (_m, uri) => `URI="${proxy(uri)}"`);
+    if (t.startsWith("#")) return line;      // other tags pass through
+    return proxy(t);                          // a segment or nested-playlist URI
+  }).join("\n");
+}
+
+// Binary-safe fetch restricted to EZVIZ hosts (so this can't be an open proxy).
+async function hlsFetch(url) {
+  if (!HLS_HOST_OK(url)) throw new Error("blocked host");
+  return fetch(url, { signal: AbortSignal.timeout(15000) });
+}
+
+// Entry point the player/poster load. Mints the current live URL, then redirects
+// to the stable playlist proxy so hls.js's live reloads hit the same URL (rather
+// than re-minting a new session each refresh).
+hikRouter.get(
+  "/cameras/:id/hls.m3u8",
+  guard("hik", async (req, res) => {
+    const { accessToken, areaDomain } = await getToken();
+    const { deviceSerial, channelNo } = parseCamId(req.params.id);
+    const data = await ezvizPost(
+      "/api/lapp/live/address/get",
+      { accessToken, deviceSerial, channelNo, protocol: 2, quality: 1, code: codeFor(deviceSerial) },
+      areaDomain
+    );
+    if (!data?.url) throw new Error("EZVIZ returned no live URL for this camera.");
+    const tok = req.query.access_token ? `&access_token=${encodeURIComponent(req.query.access_token)}` : "";
+    res.redirect(302, `/api/hik/hls/play?u=${encodeURIComponent(data.url)}${tok}`);
+  })
+);
+
+// Proxy + rewrite a playlist.
+hikRouter.get(
+  "/hls/play",
+  guard("hik", async (req, res) => {
+    const url = String(req.query.u || "");
+    const upstream = await hlsFetch(url);
+    const text = await upstream.text();
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(rewriteM3u8(text, url, req.query.access_token));
+  })
+);
+
+// Proxy a media segment / key (binary) straight through.
+hikRouter.get(
+  "/hls/seg",
+  guard("hik", async (req, res) => {
+    const url = String(req.query.u || "");
+    const upstream = await hlsFetch(url);
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp2t");
+    res.setHeader("Cache-Control", "no-store");
+    res.send(buf);
+  })
+);
+
 // Per-camera diagnostics: for the first few cameras (or ?id=serial_ch), report
 // exactly what capture and live-address return, so we can see why NVR-channel
 // thumbnails fail and whether live works. Admin-only.
