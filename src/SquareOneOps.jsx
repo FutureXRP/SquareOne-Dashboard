@@ -436,6 +436,7 @@ const PROBES = [
   { key: "napco-panel", label: "Napco Alarm — Find Panel Page", path: "/api/napco/panel-crawl" },
   { key: "napco-js", label: "Napco Alarm — Read Panel Script", path: "/api/napco/panel-js" },
   { key: "napco-status", label: "Napco Alarm — Read Status (safe)", path: "/api/napco/status" },
+  { key: "napco-secsrc", label: "Napco Alarm — Dump Security Page JS", path: "/api/napco/security-src" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },

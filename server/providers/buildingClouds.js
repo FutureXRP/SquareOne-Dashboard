@@ -387,6 +387,34 @@ napcoRouter.get(
   })
 );
 
+// Admin: dump Security.aspx's inline JavaScript — the keypad + arm/disarm +
+// bridge-connect logic. Returns each alarm-related <script> block (redacted) so
+// the connect handshake and the arm/disarm command construction can be read.
+napcoRouter.get(
+  "/security-src",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    if (!login.ok) return { loggedIn: false, status: login.status };
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const r = await fetch(`${c.baseUrl}/Security.aspx`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+    const html = await r.text();
+    // Inline <script> blocks that reference the alarm/keypad protocol.
+    const blocks = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)]
+      .map((m) => m[1])
+      .filter((b) => /DSS|Command|\barm|keypad|Send|Bridge|Connect|Params|C1Command|B3|Status|Disarm/i.test(b))
+      .map((b) => redact(b).replace(/[ \t]+/g, " ").replace(/\n{2,}/g, "\n").trim())
+      .filter((b) => b.length > 40)
+      .map((b) => b.slice(0, 3500))
+      .slice(0, 14);
+    // Keypad/arm buttons + their onclick handlers (arm/disarm triggers).
+    const buttons = [...new Set((html.match(/onclick=["'][^"']*(?:Send|Command|arm|disarm|keypad|C1|B3)[^"']*["']/gi) || []))].map(redact).slice(0, 30);
+    return { loggedIn: true, securityStatus: r.status, scriptBlocks: blocks, buttons };
+  })
+);
+
 // Admin: READ-ONLY alarm status. Logs in, opens Security.aspx to grab the live
 // DSS proxy URL (hdnProxyURL) + hidden panel params, then runs the status poll
 // (CommandText=26). Sends NO arm/disarm — safe to run against a live panel. The
