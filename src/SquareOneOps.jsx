@@ -142,6 +142,15 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
   const { bookings, members, cameras, elc, connected, usingMock, reload, snapshotUrl } =
     useDashboardData({ bookings: MOCK_BOOKINGS, members: MOCK_MEMBERS, cameras: MOCK_CAMERAS, elc: MOCK_ELC });
 
+  // Live GeoVision door list (real names + ids) for the Home cards + status.
+  const [gvDoors, setGvDoors] = useState(null); // null = loading, [] = unavailable
+  useEffect(() => {
+    apiFetch("/api/geovision/doors").then((r) => r.json())
+      .then((r) => setGvDoors(r.ok && Array.isArray(r.data?.doors) ? r.data.doors : []))
+      .catch(() => setGvDoors([]));
+  }, []);
+  const gvConnected = Array.isArray(gvDoors) && gvDoors.length > 0;
+
   /* ---- New-member sign-up feed ----
      Polls the rate-limited /api/alerts/check every 90s while the tab is
      visible: the server diffs the Amilia roster (at most ~once a minute
@@ -205,16 +214,20 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
   );
 
   // Campus verdict
+  // Campus status from the systems that are actually live: camera health, the
+  // access-control door count, and the member roster.
   const verdict = useMemo(() => {
-    const openDoors = doors.filter((d) => !d.locked);
-    const hotZones = zones.filter((z) => Math.abs(z.now - z.set) > 2);
-    if (lockdown) return { state: "LOCKDOWN", color: C.red, note: "Emergency lockdown engaged" };
-    if (alarm !== "disarmed" && openDoors.length === 0)
-      return { state: "SECURE", color: C.go, note: hotZones.length ? `Secure · ${hotZones.length} zone(s) off-target` : "All doors locked · alarm armed" };
-    if (openDoors.length && alarm === "disarmed")
-      return { state: "OPEN", color: C.cyan, note: `${openDoors.length} door(s) open · alarm off · operating` };
-    return { state: "ATTENTION", color: C.amber, note: `${openDoors.length} door open with alarm set — verify` };
-  }, [doors, zones, alarm, lockdown]);
+    const camsTotal = cameras.length;
+    const camsOnline = cameras.filter((c) => c.online).length;
+    const doorCount = gvConnected ? gvDoors.length : 0;
+    const offline = camsTotal - camsOnline;
+    if (camsTotal && offline > 0)
+      return { state: "ATTENTION", color: C.amber, note: `${offline} camera${offline > 1 ? "s" : ""} offline${doorCount ? ` · ${doorCount} doors online` : ""}` };
+    return {
+      state: "ONLINE", color: C.go,
+      note: [camsTotal ? `${camsOnline}/${camsTotal} cameras` : null, doorCount ? `${doorCount} doors` : null, `${members.total} members`].filter(Boolean).join(" · "),
+    };
+  }, [cameras, gvDoors, gvConnected, members.total]);
 
   const freshSignup = memberSignups[0] && Date.now() - new Date(memberSignups[0].at).getTime() < 24 * 3600 * 1000;
   const pageTitle = (TABS.find(([id]) => id === tab) || [, "Home"])[1];
@@ -311,8 +324,8 @@ export default function SquareOneOps({ user, role, authEnabled, onSignOut } = {}
             </div>
           </header>
           <div className="so-content">
-            <ConnectionBar connected={{ hub: hubConnected, ...connected }} onReload={() => { reload(); reloadHub(); }} />
-            {tab === "home" && <><Verdict v={verdict} /><Home doors={doors} zones={zones} alarm={alarm} log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} elc={elc} /></>}
+            <ConnectionBar connected={{ amilia: connected.amilia, hik: connected.hik, geovision: gvConnected, napco: false, pro1: false, procare: connected.procare }} onReload={() => { reload(); reloadHub(); }} />
+            {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} /></>}
             {tab === "security" && <Security doors={doors} alarm={alarm} hub={hub} lockdown={lockdown} />}
             {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
             {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
@@ -792,10 +805,12 @@ function Panel({ title, right, children, accent }) {
 // Shows which integrations are live vs preview. Honest at a glance.
 function ConnectionBar({ connected, onReload }) {
   const items = [
-    ["Hub", connected.hub],
-    ["Amilia", connected.amilia],
-    ["Hik-Connect", connected.hik],
-    ["ProCare", connected.procare],
+    ["Members · Amilia", connected.amilia],
+    ["Cameras", connected.hik],
+    ["Doors · GeoVision", connected.geovision],
+    ["Alarm · Napco", connected.napco],
+    ["Climate · Pro1", connected.pro1],
+    ["ELC · ProCare", connected.procare],
   ];
   const anyPreview = items.some(([, on]) => !on);
   return (
@@ -804,7 +819,7 @@ function ConnectionBar({ connected, onReload }) {
         ? <AlertTriangle size={14} color={C.amber} />
         : <CircleCheck size={14} color={C.go} />}
       <span style={{ color: C.mid }}>
-        {anyPreview ? "Preview — sample data until each is configured:" : "All integrations live."}
+        {anyPreview ? "Live integrations — grey ones aren't connected yet:" : "All integrations live."}
       </span>
       {items.map(([name, on]) => (
         <span key={name} className="flex items-center gap-1.5" style={{ color: on ? C.go : C.dim }}>
@@ -861,10 +876,9 @@ function Stat({ label, value, sub, color = C.text, icon: Icon }) {
 }
 
 /* ------------------------------- HOME ------------------------------- */
-function Home({ doors, zones, alarm, log, setTab, members, bookings, cameras, elc }) {
-  const locked = doors.filter((d) => d.locked).length;
+function Home({ log, setTab, members, bookings, cameras, gvDoors }) {
   const camsOnline = cameras.filter((c) => c.online).length;
-  const schedule = [["8:00", "Medical opens"], ["8:30", "Early Learning"], ["17:00", "Fitness"], ["21:00", "Lock campus"]];
+  const doorList = Array.isArray(gvDoors) ? gvDoors : [];
   return (
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
       <Panel title="At a Glance" accent={C.cyan}>
@@ -872,33 +886,34 @@ function Home({ doors, zones, alarm, log, setTab, members, bookings, cameras, el
           <Stat label="Members" value={members.total} sub={`${members.checkedInNow} here now`} icon={Users} color={C.cyan} />
           <Stat label="Upcoming bookings" value={bookings.length} sub="next 14 days" icon={Calendar} color={C.cyan} />
           <Stat label="Cameras" value={`${camsOnline}/${cameras.length}`} sub="online" icon={Video} color={camsOnline === cameras.length ? C.go : C.amber} />
-          <Stat label="ELC present" value={elc.childrenPresent} sub={`of ${elc.childrenEnrolled} enrolled`} icon={Baby} color={C.cyan} />
+          <Stat label="Access doors" value={doorList.length || "—"} sub={doorList.length ? "GeoVision" : "connecting…"} icon={DoorOpen} color={C.cyan} />
         </div>
       </Panel>
 
-      <Panel title="Doors" accent={locked === doors.length ? C.go : C.amber} right={<button onClick={() => setTab("security")} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>manage →</button>}>
-        {doors.map((d) => (
-          <div key={d.id} className="flex items-center justify-between" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 14 }}>
-            <span>{d.name}</span>
-            <span className="flex items-center gap-1.5" style={{ color: d.locked ? C.go : C.amber, fontFamily: mono, fontSize: 12.5 }}>
-              {d.locked ? <Lock size={13} /> : <Unlock size={13} />}{d.locked ? "Locked" : "Open"}
-            </span>
-          </div>
-        ))}
-      </Panel>
-
-      <Panel title="Alarm" accent={alarm !== "disarmed" ? C.go : C.amber}>
-        <div className="flex items-center gap-3" style={{ padding: "10px 0" }}>
-          {alarm !== "disarmed" ? <ShieldCheck size={32} color={C.go} /> : <ShieldAlert size={32} color={C.amber} />}
-          <div>
-            <div style={{ fontSize: 19, fontWeight: 700, textTransform: "capitalize" }}>{alarm.replace("_", " ")}</div>
-            <div style={{ fontSize: 12, color: C.dim, fontFamily: mono }}>Gemini · last sync 2m ago</div>
-          </div>
-        </div>
+      <Panel title="Doors" accent={C.cyan} right={<button onClick={() => setTab("security")} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>manage →</button>}>
+        {gvDoors === null ? (
+          <div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={13} className="spin" /> Loading doors…</div>
+        ) : doorList.length === 0 ? (
+          <Empty text="Door controller unreachable. Check GV-Access is online." />
+        ) : (
+          <>
+            {doorList.slice(0, 5).map((d) => (
+              <div key={`${d.ctrl}/${d.door}`} className="flex items-center justify-between" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 14 }}>
+                <span className="flex items-center gap-2"><DoorOpen size={13} color={C.cyan} />{d.name}</span>
+                <span style={{ color: C.dim, fontFamily: mono, fontSize: 11.5 }}>{d.controller}</span>
+              </div>
+            ))}
+            {doorList.length > 5 && (
+              <button onClick={() => setTab("security")} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12.5, cursor: "pointer", fontFamily: mono, paddingTop: 8 }}>
+                +{doorList.length - 5} more · unlock / lock →
+              </button>
+            )}
+          </>
+        )}
       </Panel>
 
       <Panel title="Next Bookings" accent={C.cyan} right={<button onClick={() => setTab("bookings")} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>all →</button>}>
-        {bookings.slice(0, 4).map((b) => (
+        {bookings.length === 0 ? <Empty text="No upcoming bookings." /> : bookings.slice(0, 5).map((b) => (
           <div key={b.id} className="flex items-center gap-3" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13.5 }}>
             <span style={{ fontFamily: mono, color: C.cyan, fontSize: 12.5, minWidth: 44 }}>{b.start}</span>
             <span style={{ flex: 1 }}>{b.room}</span>
@@ -907,39 +922,36 @@ function Home({ doors, zones, alarm, log, setTab, members, bookings, cameras, el
         ))}
       </Panel>
 
-      <Panel title="Climate" accent={zones.some((z) => Math.abs(z.now - z.set) > 2) ? C.amber : C.go} right={<button onClick={() => setTab("hvac")} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>adjust →</button>}>
-        <div className="grid grid-cols-2 gap-2">
-          {zones.map((z) => {
-            const off = Math.abs(z.now - z.set) > 2;
-            return (
-              <div key={z.id} style={{ padding: "8px 10px", background: C.panel2, borderRadius: 7, border: `1px solid ${off ? C.amber : C.border}` }}>
-                <div style={{ fontSize: 11, color: C.mid }}>{z.name}</div>
-                <div style={{ fontSize: 22, fontWeight: 700, fontFamily: mono, color: off ? C.amber : C.text }}>{z.now}°</div>
-                <div style={{ fontSize: 11, color: C.dim, fontFamily: mono }}>set {z.set}°</div>
-              </div>
-            );
-          })}
-        </div>
-      </Panel>
-
-      <Panel title="Today" accent={C.cyan}>
-        {schedule.map(([t, label]) => (
-          <div key={t} className="flex items-center gap-3" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 14 }}>
-            <span style={{ fontFamily: mono, color: C.cyan, fontSize: 13, minWidth: 46 }}>{t}</span>{label}
-          </div>
-        ))}
-      </Panel>
-
       <Panel title="Activity" accent={C.dim}>
-        {log.length === 0 ? <Empty text="No actions yet. Use Security, Climate, or the Assistant to drive the campus." />
-          : log.slice(0, 6).map((e, i) => (
+        {log.length === 0 ? <Empty text="No actions yet. Use Security or the Assistant to drive the campus." />
+          : log.slice(0, 8).map((e, i) => (
             <div key={i} className="flex items-center gap-2" style={{ padding: "5px 0", fontSize: 12.5, fontFamily: mono, color: C.mid }}>
               <span style={{ width: 6, height: 6, borderRadius: 99, background: C[e.kind] || C.dim }} />
               <span style={{ color: C.dim }}>{e.t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>{e.msg}
             </div>
           ))}
       </Panel>
+
+      <NotConnectedCard title="Alarm" system="Napco Gemini" icon={ShieldAlert}
+        blurb="Arm/disarm and live alarm status appear here once the Napco system is connected." />
+      <NotConnectedCard title="Climate" system="Pro1 thermostats" icon={Thermometer}
+        blurb="Zone temperatures and setpoints appear here once the Pro1 thermostats are connected." />
     </div>
+  );
+}
+
+// Honest placeholder for a planned-but-not-yet-connected integration.
+function NotConnectedCard({ title, system, icon: Icon, blurb }) {
+  return (
+    <Panel title={title} accent={C.dim} right={<span style={{ fontSize: 11, fontFamily: mono, color: C.dim }}>not connected</span>}>
+      <div className="flex items-center gap-3" style={{ padding: "10px 0" }}>
+        <Icon size={30} color={C.dim} />
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: C.mid }}>{system}</div>
+          <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.5, marginTop: 2 }}>{blurb}</div>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
