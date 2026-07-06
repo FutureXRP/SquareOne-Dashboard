@@ -151,6 +151,19 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
   }, []);
   const gvConnected = Array.isArray(gvDoors) && gvDoors.length > 0;
 
+  // Live Napco alarm status via the iBridge bridge. null = loading; {configured:false}
+  // = not wired. Refresh every 60s while visible (bridge read is cheap + cached).
+  const [napcoAlarm, setNapcoAlarm] = useState(null);
+  useEffect(() => {
+    let stop = false;
+    const load = () => apiFetch("/api/napco/alarm").then((r) => r.json())
+      .then((r) => { if (!stop) setNapcoAlarm(r.ok ? r.data : { configured: false }); })
+      .catch(() => { if (!stop) setNapcoAlarm({ configured: false }); });
+    load();
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60_000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
   /* ---- New-member sign-up feed ----
      Polls the rate-limited /api/alerts/check every 90s while the tab is
      visible: the server diffs the Amilia roster (at most ~once a minute
@@ -332,9 +345,9 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
             </div>
           </header>
           <div className="so-content">
-            <ConnectionBar connected={{ amilia: connected.amilia, hik: connected.hik, geovision: gvConnected, napco: false, pro1: false, procare: connected.procare }} onReload={() => { reload(); reloadHub(); }} />
-            {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} /></>}
-            {tab === "security" && <Security doors={doors} alarm={alarm} hub={hub} lockdown={lockdown} />}
+            <ConnectionBar connected={{ amilia: connected.amilia, hik: connected.hik, geovision: gvConnected, napco: !!napcoAlarm?.loggedIn, pro1: false, procare: connected.procare }} onReload={() => { reload(); reloadHub(); }} />
+            {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} napcoAlarm={napcoAlarm} /></>}
+            {tab === "security" && <Security doors={doors} alarm={alarm} napcoAlarm={napcoAlarm} hub={hub} lockdown={lockdown} />}
             {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
             {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
             {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
@@ -437,6 +450,7 @@ const PROBES = [
   { key: "napco-js", label: "Napco Alarm — Read Panel Script", path: "/api/napco/panel-js" },
   { key: "napco-status", label: "Napco Alarm — Read Status (safe)", path: "/api/napco/status" },
   { key: "napco-secsrc", label: "Napco Alarm — Dump Security Page JS", path: "/api/napco/security-src" },
+  { key: "napco-climate", label: "Napco/iBridge — Find Thermostats (Z-Wave)", path: "/api/napco/climate" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },
@@ -951,7 +965,7 @@ function Stat({ label, value, sub, color = C.text, icon: Icon }) {
 }
 
 /* ------------------------------- HOME ------------------------------- */
-function Home({ log, setTab, members, bookings, cameras, gvDoors }) {
+function Home({ log, setTab, members, bookings, cameras, gvDoors, napcoAlarm }) {
   const camsOnline = cameras.filter((c) => c.online).length;
   const doorList = Array.isArray(gvDoors) ? gvDoors : [];
   return (
@@ -1007,11 +1021,58 @@ function Home({ log, setTab, members, bookings, cameras, gvDoors }) {
           ))}
       </Panel>
 
-      <NotConnectedCard title="Alarm" system="Napco Gemini" icon={ShieldAlert}
-        blurb="Arm/disarm and live alarm status appear here once the Napco system is connected." />
+      <AlarmCard alarm={napcoAlarm} onManage={() => setTab("security")} />
       <NotConnectedCard title="Climate" system="Pro1 thermostats" icon={Thermometer}
         blurb="Zone temperatures and setpoints appear here once the Pro1 thermostats are connected." />
     </div>
+  );
+}
+
+// Live Napco alarm status card (read via the iBridge bridge). Falls back to the
+// "not connected" placeholder until the integration is wired.
+function AlarmCard({ alarm, onManage }) {
+  if (!alarm || alarm.configured === false)
+    return (
+      <NotConnectedCard title="Alarm" system="Napco Gemini" icon={ShieldAlert}
+        blurb="Arm/disarm and live alarm status appear here once the Napco system is connected." />
+    );
+
+  const loading = alarm === null;
+  const linking = alarm.loggedIn && !alarm.bridged;
+  const armed = alarm.armed === true;
+  const disarmed = alarm.armed === false;
+  const label = !alarm.loggedIn ? "Sign-in failed"
+    : linking ? "Linking…"
+    : armed ? "ARMED"
+    : disarmed ? "DISARMED"
+    : "Unknown";
+  const color = !alarm.loggedIn ? C.red : linking ? C.amber : armed ? C.red : disarmed ? C.go : C.dim;
+  const Icon = armed ? ShieldCheck : ShieldAlert;
+  const sub = armed && alarm.state && alarm.state !== "armed"
+    ? alarm.state.replace("armed-", "armed ").replace("-", " ")
+    : linking ? "bridge is connecting to the panel"
+    : disarmed ? "panel is off — building open"
+    : !alarm.loggedIn ? "check Napco credentials in settings"
+    : "";
+
+  return (
+    <Panel title="Alarm" accent={color}
+      right={onManage ? <button onClick={onManage} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>manage →</button> : <span style={{ fontSize: 11, fontFamily: mono, color: C.dim }}>read-only</span>}>
+      <div className="flex items-center gap-3" style={{ padding: "8px 0" }}>
+        {loading ? <Loader2 size={30} className="spin" color={C.dim} /> : <Icon size={30} color={color} />}
+        <div>
+          <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: mono, letterSpacing: 0.5 }}>
+            {loading ? "…" : label}
+          </div>
+          <div style={{ fontSize: 12, color: C.mid }}>
+            {loading ? "reading panel…" : sub}
+          </div>
+        </div>
+      </div>
+      <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, paddingTop: 4 }}>
+        Napco Gemini · iBridge{alarm.statusRaw !== undefined ? ` · status ${alarm.statusRaw}` : ""}
+      </div>
+    </Panel>
   );
 }
 
@@ -1031,9 +1092,10 @@ function NotConnectedCard({ title, system, icon: Icon, blurb }) {
 }
 
 /* ----------------------------- SECURITY ----------------------------- */
-function Security() {
+function Security({ napcoAlarm }) {
   return (
     <div className="grid gap-3">
+      <AlarmCard alarm={napcoAlarm} />
       <MasterDoorControls />
       <GeoVisionDoors />
     </div>
