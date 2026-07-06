@@ -967,21 +967,6 @@ function Security({ doors, alarm, hub, lockdown }) {
         </div>
       </Panel>
 
-      <Panel title="Doors" accent={doors.every((d) => d.locked) ? C.go : C.amber}>
-        {doors.map((d) => (
-          <div key={d.id} className="flex items-center justify-between" style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
-            <span className="flex items-center gap-2" style={{ fontSize: 14.5 }}>
-              {d.locked ? <Lock size={15} color={C.go} /> : <Unlock size={15} color={C.amber} />}{d.name}
-            </span>
-            <button onClick={() => d.locked ? hub.unlockDoor(d.id) : hub.lockDoor(d.id)} className="so-btn"
-              style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 92,
-                color: d.locked ? C.cyan : C.go, borderColor: d.locked ? C.border : C.go }}>
-              {d.locked ? "Unlock" : "Lock"}
-            </button>
-          </div>
-        ))}
-      </Panel>
-
       <GeoVisionDoors />
     </div>
   );
