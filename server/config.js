@@ -117,6 +117,11 @@ export const config = {
     baseUrl: process.env.GV_BASE_URL || "", // e.g. https://sqone.ddns.net:port
     username: process.env.GV_USERNAME || process.env.GV_EMAIL || "",
     password: process.env.GV_PASSWORD || "",
+    // Doors shown on the Security tab, JSON array of {name, ctrl, door}, where
+    // ctrl = controller id and door = dr_id (both from the captured command /
+    // the /monitor discovery). e.g.
+    // GV_DOORS=[{"name":"Front Door","ctrl":1,"door":4},{"name":"Medical","ctrl":1,"door":3}]
+    doors: parseJsonEnv("GV_DOORS") || [],
     get email() { return this.username; }, // probe helper reads .email
     get configured() {
       return Boolean(this.baseUrl && this.username && this.password);
