@@ -254,17 +254,15 @@ export const pro1Router = makeProbeRouter("pro1", [
 //   2. Cloud — the iBridge app's API host; probe the likely iBridge/iSee hosts.
 // NAPCO_BASE_URL pins whichever the debug output reveals.
 export const napcoRouter = makeProbeRouter("napco", [
-  // iBridge / iSee cloud (older Napco platform — matches this site's module).
+  // iBridge Online — the actual web portal the operator uses to control the
+  // alarm. This is the target; set NAPCO_BASE_URL=https://ibridgeonline.com.
+  "https://ibridgeonline.com",
+  "https://www.ibridgeonline.com",
+  "https://app.ibridgeonline.com",
+  "https://api.ibridgeonline.com",
+  // Older iBridge / iSee cloud hosts (fallbacks).
   "https://ibridge.napcosecurity.com",
-  "https://www.ibridge.napcosecurity.com",
-  "https://ibridgeapi.napcosecurity.com",
-  "https://blink.napcosecurity.com",
   "https://isee.napcosecurity.com",
-  "https://iseevideo.napcosecurity.com",
-  // StarLink / Gemini (kept in case the module reports there too).
-  "https://api.napcocomnet.com",
-  "https://geminiapp.napcosecurity.com",
-  "https://starlinkconnect.napcosecurity.com",
 ]);
 
 // Crawl a Napco base URL (the local module's web interface, or a cloud host) for
