@@ -95,16 +95,17 @@ async function gvCommand(fields, retry = true) {
   return { status: res.status, text: await res.text() };
 }
 
-// The Monitor module (LiveLog.js) revealed the real handshake: monitor ops only
-// work for a client_guid the SERVER issues. GET_ALL_DEVICES returns that guid
-// (o.client_guid) — invented guids get errcode 4. We register once, cache the
-// server guid, and reuse it (re-registering if a call later reports it stale).
+// The real handshake (from ServerConnector.js): monitor ops need a client_guid
+// the SERVER mints. WEBCLIENT_LOGIN with an EMPTY client_guid + login=1 returns
+// the authoritative one (response.client_guid). Invented guids get errcode 4.
+// We register once, cache the server guid, and reuse it (re-registering if a
+// later call reports it stale).
 let gvMonitorGuid = null;
 
 async function gvRegister(force = false) {
   if (gvMonitorGuid && !force) return gvMonitorGuid;
-  // Seed with our generated guid; the server echoes back the authoritative one.
-  const r = await gvCommand({ action: "GET_ALL_DEVICES", module: "monitor", client_guid: gvMonitorGuid || GV_CLIENT_GUID });
+  // Empty client_guid tells the server to issue a fresh one (login=1 = connect).
+  const r = await gvCommand({ action: "WEBCLIENT_LOGIN", module: "monitor", client_guid: "", login: 1 });
   let p = null; try { p = JSON.parse(r.text); } catch { /* not json */ }
   if (p?.success && p.client_guid) gvMonitorGuid = p.client_guid;
   return gvMonitorGuid;
