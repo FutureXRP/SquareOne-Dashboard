@@ -398,6 +398,72 @@ geovisionRouter.get(
   })
 );
 
+// The ExtJS desktop loads the Monitor module dynamically — its JS isn't in the
+// shell's <script> tags. Dump the raw shell + login.js (which name the real
+// module/handler paths) and probe likely Monitor-module JS locations; for any
+// hit, scan it for DOOR_OPERATION and the surrounding request-build code.
+geovisionRouter.get(
+  "/shell",
+  requireAdmin,
+  guard("geovision", async () => {
+    const cookie = await gvLogin(true);
+    const base = config.geovision.baseUrl;
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const res = await gvGet(path, cookie);
+        const text = await res.text();
+        return { path, status: res.status, len: text.length, text };
+      } catch (e) { return { path, error: e.message }; }
+    };
+
+    // 1. Raw shell + login.js — server-rendered, they name the real app paths.
+    const shell = await get("/ASWeb/ASWeb.srf");
+    const login = await get("/ASWeb/login/login.js");
+
+    // Every .js / .srf path mentioned anywhere in the shell (dynamic loaders
+    // often build the module path from a string literal).
+    const shellText = shell.text || "";
+    const jsRefs = [...new Set(shellText.match(/[\w./-]+\.(?:js|srf)/gi) || [])];
+
+    // 2. Probe likely Monitor-module JS locations (GV puts app modules outside
+    // the ext example dir). Anything that 200s with real length gets scanned.
+    const candidates = [...new Set([
+      ...jsRefs.map((r) => (r.startsWith("/") ? r : `/ASWeb/${r.replace(/^\.?\//, "")}`)),
+      "/ASWeb/js/monitor.js", "/ASWeb/js/Monitor.js", "/ASWeb/monitor/monitor.js",
+      "/ASWeb/module/monitor.js", "/ASWeb/module/Monitor.js", "/ASWeb/js/module/monitor.js",
+      "/ASWeb/js/desktop.js", "/ASWeb/js/asweb.js", "/ASWeb/js/main.js", "/ASWeb/js/app.js",
+      "/ASWeb/desktop/monitor.js", "/ASWeb/bin/monitor.js", "/ASWeb/monitor.js",
+      "/ASWeb/js/modules/monitor.js", "/ASWeb/js/gvmonitor.js", "/ASWeb/js/ASWeb.js",
+    ])].filter((p) => /\.js$/i.test(p) && !/ext-3\.4\.0/.test(p)).slice(0, 40);
+
+    const hits = [];
+    for (const p of candidates) {
+      const r = await get(p);
+      if (r.status === 200 && r.len > 40) {
+        const hasDoorOp = /DOOR_OPERATION/.test(r.text);
+        const acts = [...new Set(r.text.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/g) || [])]
+          .filter((t) => t.length >= 5 && t.length <= 40 && !/^(NUM_|PAGE_|XML_)/.test(t)).slice(0, 60);
+        let doorCtx;
+        if (hasDoorOp) {
+          const i = r.text.indexOf("DOOR_OPERATION");
+          doorCtx = redact(r.text.slice(Math.max(0, i - 600), i + 600));
+        }
+        hits.push({ path: p, len: r.len, hasDoorOp, actions: acts, doorCtx });
+      }
+    }
+    // DOOR_OPERATION-bearing files first.
+    hits.sort((a, b) => (a.hasDoorOp ? 0 : 1) - (b.hasDoorOp ? 0 : 1) || b.len - a.len);
+
+    return {
+      base, shell: { status: shell.status, len: shell.len },
+      rawShell: redact(shellText).slice(0, 4000),
+      loginJs: redact(login.text || login.error || "").slice(0, 2000),
+      jsRefs, probed: candidates.length, hits,
+    };
+  })
+);
+
 // Directly probe GV-ASManager ASWeb door/controller .srf handlers (Door/GetList
 // .srf already returns 500 = exists). Tries GET+POST and reports status + body,
 // so the real list + open endpoints (and their params) can be read off.
