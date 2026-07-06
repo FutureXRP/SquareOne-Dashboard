@@ -403,6 +403,7 @@ const PROBES = [
   { key: "geovision-tree", label: "GV-Access Door List + Monitor Module", path: "/api/geovision/tree" },
   { key: "geovision-livelog", label: "GV-Access Find Register Call", path: "/api/geovision/livelog" },
   { key: "geovision-serverconn", label: "GV-Access Read Connect Call", path: "/api/geovision/serverconn" },
+  { key: "geovision-doorops", label: "GV-Access Door Operations", path: "/api/geovision/door-ops" },
   { key: "geovision-doors", label: "GV-Access Find Door API", path: "/api/geovision/probe-doors" },
   { key: "geovision-monitor", label: "GV-Access Map Doors (ids → names)", path: "/api/geovision/monitor" },
   { key: "geovision-logs", label: "GV-Access Event Log (door names)", path: "/api/geovision/logs" },
