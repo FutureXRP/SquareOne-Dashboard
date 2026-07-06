@@ -387,6 +387,47 @@ napcoRouter.get(
   })
 );
 
+// Admin: READ-ONLY alarm status. Logs in, opens Security.aspx to grab the live
+// DSS proxy URL (hdnProxyURL) + hidden panel params, then runs the status poll
+// (CommandText=26). Sends NO arm/disarm — safe to run against a live panel. The
+// raw response reveals the status format + the Params needed for control later.
+napcoRouter.get(
+  "/status",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    if (!login.ok) return { loggedIn: false, status: login.status };
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path, opts = {}) => {
+      try { const r = await fetch(/^https?:/i.test(path) ? path : `${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000), ...opts }); return { status: r.status, text: await r.text() }; }
+      catch (e) { return { error: e.message }; }
+    };
+
+    // Open the panel page to capture the per-session proxy URL + hidden params.
+    const sec = await get("/Security.aspx");
+    const html = sec.text || "";
+    const hiddens = {};
+    for (const m of html.matchAll(/name="[^"]*\$(hdn\w+)"[^>]*value="([^"]*)"/gi)) hiddens[m[1]] = m[2].slice(0, 80);
+    let proxy = hiddens.hdnProxyURL || "";
+    // The page ships a localhost proxy for on-site use; the public one is the
+    // ibridge DSS handler. Prefer the hidden value unless it's localhost/empty.
+    let proxyUrl = proxy && !/localhost|127\.0\.0\.1/i.test(proxy) ? proxy : `${c.baseUrl}/ibridge/DSS.aspx`;
+
+    // READ-ONLY poll (CommandText=26 = status). No arm/disarm commands issued.
+    const dss = async (cmd, params = "") => {
+      const u = `${proxyUrl}${proxyUrl.includes("?") ? "&" : "?"}CommandText=${encodeURIComponent(cmd)}&PageName=SSS2&Params=${encodeURIComponent(params)}`;
+      const r = await get(u);
+      return { cmd, status: r.status, body: r.error ? undefined : redact(r.text).slice(0, 800), error: r.error };
+    };
+    const poll = await dss("26", "");
+
+    return { loggedIn: true, securityStatus: sec.status, proxyRaw: proxy, proxyUrl, hiddenParams: hiddens, statusPoll: poll };
+  })
+);
+
 // Admin: dump the arm/disarm command-building JavaScript from the panel page
 // (Security.aspx) + NapcoSite.js. The commands are built dynamically (CommandText
 // = a variable), so we surface the function names + the code windows around
