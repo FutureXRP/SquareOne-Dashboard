@@ -944,31 +944,56 @@ function Home({ doors, zones, alarm, log, setTab, members, bookings, cameras, el
 }
 
 /* ----------------------------- SECURITY ----------------------------- */
-function Security({ doors, alarm, hub, lockdown }) {
+function Security() {
   return (
     <div className="grid gap-3">
-      <Panel title="Master Controls">
-        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-          <BigBtn icon={Lock} label="Lock campus" onClick={hub.lockAll} color={C.go} />
-          <BigBtn icon={Unlock} label="Unlock campus" onClick={hub.unlockAll} color={C.cyan} />
-          <BigBtn icon={ShieldCheck} label="Arm away" onClick={() => hub.arm("armed_away")} color={C.go} active={alarm === "armed_away"} />
-          <BigBtn icon={ShieldAlert} label="Disarm" onClick={hub.disarm} color={C.amber} active={alarm === "disarmed"} />
-        </div>
-        <div style={{ marginTop: 10 }}>
-          {!lockdown ? (
-            <button onClick={hub.lockdown} className="so-btn" style={{ width: "100%", padding: "12px", borderRadius: 8, fontWeight: 700, letterSpacing: 1, color: C.red, background: C.redBg, borderColor: C.red }}>
-              EMERGENCY LOCKDOWN
-            </button>
-          ) : (
-            <button onClick={hub.clearLockdown} className="so-btn" style={{ width: "100%", padding: "12px", borderRadius: 8, fontWeight: 700, color: C.go, background: C.goBg, borderColor: C.go }}>
-              Clear lockdown
-            </button>
-          )}
-        </div>
-      </Panel>
-
+      <MasterDoorControls />
       <GeoVisionDoors />
     </div>
+  );
+}
+
+// Campus-wide door controls, driving every real GeoVision door at once.
+// Unlock all = hold open, Secure all = return to normal locked access,
+// Lockdown = block all entry. Attributed + logged like the per-door actions.
+function MasterDoorControls() {
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const run = async (opKey, label, confirmText) => {
+    if (confirmText && !window.confirm(confirmText)) return;
+    setBusy(opKey); setMsg(null);
+    try {
+      const r = await apiFetch(`/api/geovision/doors-all/${opKey}`, { method: "POST" }).then((res) => res.json());
+      if (r.ok && r.data) setMsg({ ok: r.data.okCount > 0, text: `${label}: ${r.data.okCount} of ${r.data.total} doors` });
+      else setMsg({ ok: false, text: r.message || "Command failed" });
+    } catch (e) { setMsg({ ok: false, text: e.message }); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <Panel title="Master Controls">
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
+        <BigBtn icon={Unlock} label="Unlock all doors" color={C.cyan} loading={busy === "force-unlock"}
+          onClick={() => run("force-unlock", "Unlock all", "Hold EVERY door open until you press Secure all?\n\nUse this to open the building.")} />
+        <BigBtn icon={Lock} label="Secure all doors" color={C.go} loading={busy === "release"}
+          onClick={() => run("release", "Secure all")} />
+      </div>
+      <div style={{ marginTop: 10 }}>
+        <button onClick={() => run("lockdown", "Lockdown", "EMERGENCY LOCKDOWN — lock every door and block all card access?")}
+          disabled={!!busy} className="so-btn" style={{ width: "100%", padding: "12px", borderRadius: 8, fontWeight: 700, letterSpacing: 1, color: C.red, background: C.redBg, borderColor: C.red }}>
+          {busy === "lockdown" ? "Sending…" : "EMERGENCY LOCKDOWN"}
+        </button>
+      </div>
+      {msg && (
+        <div style={{ marginTop: 10, fontSize: 12.5, fontFamily: mono, color: msg.ok ? C.go : C.red }}>
+          {msg.ok ? "✓ " : "✕ "}{msg.text}
+        </div>
+      )}
+      <div style={{ marginTop: 8, fontSize: 11.5, color: C.dim, lineHeight: 1.5 }}>
+        <strong style={{ color: C.mid }}>Unlock all</strong> holds every door open · <strong style={{ color: C.mid }}>Secure all</strong> returns them to normal locked/card access · <strong style={{ color: C.mid }}>Lockdown</strong> blocks all entry. Alarm arm/disarm returns once the Napco system is connected.
+      </div>
+    </Panel>
   );
 }
 
@@ -1092,11 +1117,11 @@ function GeoVisionDoors() {
   );
 }
 
-function BigBtn({ icon: Icon, label, onClick, color, active }) {
+function BigBtn({ icon: Icon, label, onClick, color, active, loading }) {
   return (
-    <button onClick={onClick} className="so-btn flex flex-col items-center gap-2"
-      style={{ padding: "16px 10px", borderRadius: 9, borderColor: active ? color : C.border, background: active ? C.panelHi : C.panel2 }}>
-      <Icon size={22} color={color} />
+    <button onClick={onClick} disabled={loading} className="so-btn flex flex-col items-center gap-2"
+      style={{ padding: "16px 10px", borderRadius: 9, borderColor: active ? color : C.border, background: active ? C.panelHi : C.panel2, opacity: loading ? 0.7 : 1 }}>
+      {loading ? <Loader2 size={22} className="spin" color={color} /> : <Icon size={22} color={color} />}
       <span style={{ fontSize: 13, fontWeight: 600 }}>{label}</span>
     </button>
   );
