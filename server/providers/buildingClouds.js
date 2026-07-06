@@ -341,6 +341,23 @@ async function napcoLogin(username, password) {
   return { ok, status: p.status, location: loc, cookie: jar };
 }
 
+// The iBridge->panel bridge is stateful and tied to the ASP.NET session, and it
+// takes several seconds for the on-site module to link up. So we cache the login
+// session and REUSE it across calls: the connect (23) is sent on a fresh session,
+// then subsequent polls (on the cached session) let the bridge finish. Returns
+// { cookie, fresh } — fresh=true means this is a brand-new session (send connect).
+async function napcoSession(username, password, force = false) {
+  const scope = config.napco.baseUrl || "default";
+  if (!force) {
+    const cached = await getCachedToken("napco-session", scope);
+    if (cached?.token) return { cookie: cached.token, fresh: false };
+  }
+  const login = await napcoLogin(username, password);
+  if (!login.ok) return { cookie: null, fresh: false };
+  await setCachedToken("napco-session", scope, login.cookie, {}, Date.now() + 15 * 60 * 1000);
+  return { cookie: login.cookie, fresh: true };
+}
+
 // Admin: verify the iBridge Online login and map the arm/disarm surface. Logs in,
 // then pulls the authenticated home + NapcoSite.js + DSS.aspx to find the command
 // endpoint/params. Credentials come from the operator's vault or NAPCO_ env vars.
@@ -425,50 +442,43 @@ napcoRouter.get(
   guard("napco", async (req) => {
     const c = config.napco;
     const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
-    const login = await napcoLogin(username || c.username, secret || c.password);
-    if (!login.ok) return { loggedIn: false, status: login.status };
+    const { cookie, fresh } = await napcoSession(username || c.username, secret || c.password);
+    if (!cookie) return { loggedIn: false };
 
     const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
     const get = async (path, opts = {}) => {
-      try { const r = await fetch(/^https?:/i.test(path) ? path : `${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000), ...opts }); return { status: r.status, text: await r.text() }; }
+      try { const r = await fetch(/^https?:/i.test(path) ? path : `${c.baseUrl}${path}`, { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000), ...opts }); return { status: r.status, text: await r.text() }; }
       catch (e) { return { error: e.message }; }
     };
-
-    // Open the panel page to capture the per-session proxy URL + hidden params.
-    const sec = await get("/Security.aspx");
-    const html = sec.text || "";
-    const hiddens = {};
-    for (const m of html.matchAll(/name="[^"]*\$(hdn\w+)"[^>]*value="([^"]*)"/gi)) hiddens[m[1]] = m[2].slice(0, 80);
-    let proxy = hiddens.hdnProxyURL || "";
-    // The page ships a localhost proxy for on-site use; the public one is the
-    // ibridge DSS handler. Prefer the hidden value unless it's localhost/empty.
-    let proxyUrl = proxy && !/localhost|127\.0\.0\.1/i.test(proxy) ? proxy : `${c.baseUrl}/ibridge/DSS.aspx`;
+    const proxyUrl = `${c.baseUrl}/DSS.aspx`; // confirmed hdnProxyURL value
 
     // READ-ONLY DSS call. CommandText 23 = connect/open bridge, 26 = status poll.
     // No arm/disarm (those are SendC1Command keystrokes) — safe on a live panel.
     const dss = async (cmd, params = "") => {
-      const u = `${proxyUrl}${proxyUrl.includes("?") ? "&" : "?"}CommandText=${encodeURIComponent(cmd)}&PageName=SSS2&Params=${encodeURIComponent(params)}`;
+      const u = `${proxyUrl}?CommandText=${encodeURIComponent(cmd)}&PageName=SSS2&Params=${encodeURIComponent(params)}`;
       const r = await get(u);
-      return { cmd, status: r.status, body: r.error ? undefined : redact(r.text).slice(0, 700), error: r.error };
+      return { cmd, status: r.status, body: r.error ? undefined : redact(r.text).slice(0, 600), error: r.error };
     };
     const bridged = (b) => /<BridgedWithRCM>\s*1\s*<\/BridgedWithRCM>/i.test(b || "");
+    const statusOf = (b) => (b?.match(/<Status>\s*(\d+)\s*<\/Status>/i) || [])[1];
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    // 1. Open the bridge to the on-site panel (CheckKeyPadtype -> Send23Command("23")).
-    const connect = await dss("23", "");
-    // 2. Poll status until the RCM bridge reports connected (browser polls every
-    // 500ms; give the on-site module a few tries to come online).
+    // On a fresh session, initiate the connect; on a reused one the bridge is
+    // already in progress, so just poll (re-connecting would reset it).
+    const connect = fresh ? await dss("23", "") : { note: "reusing session — bridge continuing" };
     const polls = [];
-    for (let i = 0; i < 5; i++) {
-      await wait(700);
+    for (let i = 0; i < 7; i++) {
+      await wait(800);
       const p = await dss("26", "");
       polls.push(p);
       if (bridged(p.body)) break;
     }
     const last = polls[polls.length - 1];
     return {
-      loggedIn: true, securityStatus: sec.status, proxyUrl, hiddenParams: hiddens,
-      bridged: bridged(last?.body), connect, polls,
+      loggedIn: true, freshSession: fresh, proxyUrl,
+      bridged: bridged(last?.body), status: statusOf(last?.body),
+      hint: bridged(last?.body) ? "bridged — Status is the live panel state" : "not bridged yet — run again in a few seconds (session is cached, bridge keeps linking)",
+      connect, polls,
     };
   })
 );
