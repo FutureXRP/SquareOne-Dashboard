@@ -95,21 +95,49 @@ async function gvCommand(fields, retry = true) {
   return { status: res.status, text: await res.text() };
 }
 
-// GV door operations only succeed for a client_guid the server recognizes as a
-// live Monitor client. The Monitor page establishes that by starting its
-// notification long-poll; the first poll with our guid registers the session.
-// wait_time=0 returns immediately (blocking poll uses 60). Fire-and-forget.
-async function gvRegister() {
-  try { return await gvCommand({ action: "LONG_POLLING_NOTIFICATIONS", module: "monitor", wait_time: 0 }); }
-  catch (e) { return { status: 0, text: e.message }; }
+// The Monitor module (LiveLog.js) revealed the real handshake: monitor ops only
+// work for a client_guid the SERVER issues. GET_ALL_DEVICES returns that guid
+// (o.client_guid) — invented guids get errcode 4. We register once, cache the
+// server guid, and reuse it (re-registering if a call later reports it stale).
+let gvMonitorGuid = null;
+
+async function gvRegister(force = false) {
+  if (gvMonitorGuid && !force) return gvMonitorGuid;
+  // Seed with our generated guid; the server echoes back the authoritative one.
+  const r = await gvCommand({ action: "GET_ALL_DEVICES", module: "monitor", client_guid: gvMonitorGuid || GV_CLIENT_GUID });
+  let p = null; try { p = JSON.parse(r.text); } catch { /* not json */ }
+  if (p?.success && p.client_guid) gvMonitorGuid = p.client_guid;
+  return gvMonitorGuid;
 }
 
-// Unlock / lock a door by controller id + door id. Registers our monitor session
-// first so the door engine accepts the client_guid, then sends the operation.
-const gvDoorOp = async (ctrlId, drId, operation) => {
-  await gvRegister();
-  return gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation });
-};
+// Unlock / lock a door by controller id + door id, using the server-issued
+// monitor guid. dvg_id=0 matches the captured working request. Retries once with
+// a fresh registration if the guid was rejected.
+async function gvDoorOp(ctrlId, drId, operation, retry = true) {
+  const guid = await gvRegister();
+  const send = (g) => gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation, client_guid: g || GV_CLIENT_GUID });
+  let r = await send(guid);
+  let p = null; try { p = JSON.parse(r.text); } catch { /* not json */ }
+  if (!p?.success && retry) {           // stale/invalid guid → re-register once
+    r = await send(await gvRegister(true));
+  }
+  return r;
+}
+
+// Live controller/door tree via CONTROLLER_LIST (rows carry ids AND names), so
+// the Security tab always reflects the real doors without any env config.
+async function gvDoorTree() {
+  const r = await gvCommand({ action: "CONTROLLER_LIST", type: "all", pos: -1, start: 0, limit: 1000 });
+  let t = null; try { t = JSON.parse(r.text); } catch { /* not json */ }
+  if (!Array.isArray(t?.data)) return null;
+  return t.data
+    .filter((row) => Number(row.dr_id) >= 0 && !Number(row.is_input) && Number(row.dr_enable))
+    .map((row) => ({
+      name: row.dr_name || `Door ${Number(row.dr_id) + 1}`,
+      controller: row.ctrl_name || `Controller ${row.ctrl_id}`,
+      ctrl: Number(row.ctrl_id), door: Number(row.dr_id),
+    }));
+}
 
 /*
   Building-system cloud providers: Pro1 thermostats, Napco alarm (iBridge/Prima),
@@ -723,11 +751,18 @@ geovisionRouter.get(
   })
 );
 
-// Configured doors (GV_DOORS env: [{"name","ctrl","door"}]) for the Security tab.
+// Doors for the Security tab. Pulled LIVE from the controller (real names +
+// ids), so nothing needs configuring; falls back to the GV_DOORS env override
+// if the live tree can't be read.
 geovisionRouter.get(
   "/doors",
   requireAuth,
-  guard("geovision", async () => ({ doors: config.geovision.doors })),
+  guard("geovision", async () => {
+    let doors = null, source = "live";
+    try { doors = await gvDoorTree(); } catch { /* fall through */ }
+    if (!doors || !doors.length) { doors = config.geovision.doors || []; source = "config"; }
+    return { doors, source };
+  }),
 );
 
 // Unlock / lock a specific door. Body/params: ctrl (controller id), door (dr_id).
@@ -756,12 +791,13 @@ geovisionRouter.get(
   guard("geovision", async (req) => {
     const ctrl = Number(req.query.ctrl ?? 1);
     const door = Number(req.query.door ?? 4);
-    const reg = await gvRegister();
-    const op = await gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrl, dr_id: door, operation: "UNLOCK_DOOR" });
+    const guid = await gvRegister(true); // GET_ALL_DEVICES → server-issued guid
+    const op = await gvDoorOp(ctrl, door, "UNLOCK_DOOR");
     let parsed = null; try { parsed = JSON.parse(op.text); } catch { /* not json */ }
     return {
-      sent: { ctrl, door, operation: "UNLOCK_DOOR", client_guid: GV_CLIENT_GUID },
-      register: { status: reg.status, response: reg.text.slice(0, 200) },
+      sent: { ctrl, door, operation: "UNLOCK_DOOR" },
+      registered: Boolean(guid),
+      serverClientGuid: guid ? `${String(guid).slice(0, 8)}…` : null,
       doorOp: { status: op.status, response: op.text.slice(0, 300) },
       success: parsed?.success === 1 || parsed?.success === true,
     };
@@ -775,9 +811,9 @@ geovisionRouter.get(
   "/logs",
   requireAdmin,
   guard("geovision", async (req) => {
-    await gvRegister(); // logs are per monitor session
+    const guid = await gvRegister(); // logs are per monitor session (server guid)
     const max = Number(req.query.max ?? 100);
-    const r = await gvCommand({ action: "GET_LOGS", module: "monitor", wait_time: 0, e_logid: 0, max_log: max });
+    const r = await gvCommand({ action: "GET_LOGS", module: "monitor", wait_time: 0, e_logid: 0, max_log: max, client_guid: guid || GV_CLIENT_GUID });
     let parsed = null; try { parsed = JSON.parse(r.text); } catch { /* html/text */ }
     return { status: r.status, count: Array.isArray(parsed?.logs) ? parsed.logs.length : undefined,
       body: parsed || r.text.slice(0, 2000) };

@@ -1018,43 +1018,55 @@ function GeoVisionDoors() {
   if (doors === null)
     return <Panel title="GV-Access Doors (live)" accent={C.cyan}><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13 }}><Loader2 size={14} className="spin" /> Loading doors…</div></Panel>;
 
+  // Group by controller so the two panels' doors are visually separated.
+  const groups = doors.reduce((m, d) => {
+    const g = d.controller || `Controller ${d.ctrl}`;
+    (m[g] = m[g] || []).push(d); return m;
+  }, {});
+
+  const DoorRow = (d) => {
+    const key = `${d.ctrl}/${d.door}`;
+    const res = result[key];
+    return (
+      <div key={key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+        <div className="flex items-center justify-between" style={{ gap: 10 }}>
+          <span className="flex items-center gap-2" style={{ fontSize: 14.5 }}>
+            <DoorOpen size={15} color={C.cyan} />{d.name}
+          </span>
+          <div className="flex items-center gap-2">
+            <button onClick={() => send(d, "unlock")} disabled={busy} className="so-btn flex items-center gap-1.5"
+              style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 92, color: C.cyan, borderColor: C.cyan }}>
+              {busy === `${key}:unlock` ? <Loader2 size={13} className="spin" /> : <Unlock size={13} />} Unlock
+            </button>
+            <button onClick={() => send(d, "lock")} disabled={busy} className="so-btn flex items-center gap-1.5"
+              style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 80, color: C.go, borderColor: C.border }}>
+              {busy === `${key}:lock` ? <Loader2 size={13} className="spin" /> : <Lock size={13} />} Lock
+            </button>
+          </div>
+        </div>
+        {res && (
+          <div style={{ marginTop: 6, fontSize: 12, fontFamily: mono, color: res.ok ? C.go : C.red }}>
+            {res.ok ? "✓ " : "✕ "}{res.msg}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <Panel title="GV-Access Doors (live)" accent={C.cyan}
       right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>real hardware</span>}>
       {doors.length === 0 ? (
         <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.5 }}>
-          No doors configured yet. An admin sets the <code style={{ fontFamily: mono, color: C.text }}>GV_DOORS</code> environment
-          variable to a JSON list like <code style={{ fontFamily: mono, color: C.text }}>{`[{"name":"Front Door","ctrl":1,"door":4}]`}</code>.
-          Use <strong style={{ color: C.text }}>Settings → Diagnostics → GV-Access Map Doors</strong> to look up the controller and door ids.
+          Couldn't reach the door controller. Check that GV-Access is online, then reload.
+          You can also run <strong style={{ color: C.text }}>Settings → Diagnostics → GV-Access Door List</strong> to test the connection.
         </div>
-      ) : doors.map((d) => {
-        const key = `${d.ctrl}/${d.door}`;
-        const res = result[key];
-        return (
-          <div key={key} style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
-            <div className="flex items-center justify-between" style={{ gap: 10 }}>
-              <span className="flex items-center gap-2" style={{ fontSize: 14.5 }}>
-                <DoorOpen size={15} color={C.cyan} />{d.name}
-              </span>
-              <div className="flex items-center gap-2">
-                <button onClick={() => send(d, "unlock")} disabled={busy} className="so-btn flex items-center gap-1.5"
-                  style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 92, color: C.cyan, borderColor: C.cyan }}>
-                  {busy === `${key}:unlock` ? <Loader2 size={13} className="spin" /> : <Unlock size={13} />} Unlock
-                </button>
-                <button onClick={() => send(d, "lock")} disabled={busy} className="so-btn flex items-center gap-1.5"
-                  style={{ padding: "6px 16px", borderRadius: 6, fontSize: 13, fontWeight: 600, minWidth: 80, color: C.go, borderColor: C.border }}>
-                  {busy === `${key}:lock` ? <Loader2 size={13} className="spin" /> : <Lock size={13} />} Lock
-                </button>
-              </div>
-            </div>
-            {res && (
-              <div style={{ marginTop: 6, fontSize: 12, fontFamily: mono, color: res.ok ? C.go : C.red }}>
-                {res.ok ? "✓ " : "✕ "}{res.msg}
-              </div>
-            )}
-          </div>
-        );
-      })}
+      ) : Object.entries(groups).map(([ctrlName, list]) => (
+        <div key={ctrlName} style={{ marginBottom: 6 }}>
+          <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.dim, fontFamily: mono, padding: "8px 0 2px" }}>{ctrlName}</div>
+          {list.map(DoorRow)}
+        </div>
+      ))}
     </Panel>
   );
 }
