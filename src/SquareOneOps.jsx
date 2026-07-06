@@ -433,6 +433,7 @@ const PROBES = [
   { key: "napco-probe", label: "Napco Alarm — Crawl Module/Host", path: "/api/napco/probe" },
   { key: "napco-login", label: "Napco Alarm — Log In + Map Commands", path: "/api/napco/login-test" },
   { key: "napco-commands", label: "Napco Alarm — Find Arm/Disarm Codes", path: "/api/napco/commands" },
+  { key: "napco-panel", label: "Napco Alarm — Find Panel Page", path: "/api/napco/panel-crawl" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },

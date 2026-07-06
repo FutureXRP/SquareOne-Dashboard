@@ -434,6 +434,59 @@ napcoRouter.get(
   })
 );
 
+// Admin: the arm/disarm controls live on a panel page linked from Default.aspx
+// (not the home itself). Log in, follow every authenticated .aspx link (+ likely
+// control-page names), and report which page carries the arm/disarm DSS commands.
+napcoRouter.get(
+  "/panel-crawl",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const login = await napcoLogin(username || c.username, secret || c.password);
+    if (!login.ok) return { loggedIn: false, status: login.status, location: login.location };
+
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const get = async (path) => {
+      try {
+        const r = await fetch(`${c.baseUrl}${path}`, { headers: { Cookie: login.cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+        return { status: r.status, text: await r.text() };
+      } catch (e) { return { error: e.message }; }
+    };
+
+    const home = await get("/Default.aspx");
+    const html = home.text || "";
+    const links = [...new Set([...html.matchAll(/href=["']([^"']*\.aspx[^"']*)["']/gi)].map((m) => m[1]))]
+      .filter((h) => !/logout|forgot|login/i.test(h));
+    const onclicks = [...new Set((html.match(/\b(?:onclick|href)=["'][^"']*(?:DSS|CommandText|arm|disarm|command)[^"']*["']/gi) || []))].map(redact).slice(0, 20);
+
+    const candidates = ["/Devices.aspx", "/Panel.aspx", "/Security.aspx", "/Keypad.aspx", "/Control.aspx",
+      "/PanelStatus.aspx", "/Arming.aspx", "/iBridge.aspx", "/myPanel.aspx", "/SecurityPanel.aspx",
+      "/PanelControl.aspx", "/Home.aspx", "/Main.aspx", "/Account.aspx", "/DeviceList.aspx"];
+    const targets = [...new Set([
+      ...links.map((l) => (l.startsWith("/") ? l : `/${l.replace(/^\.?\//, "")}`)),
+      ...candidates,
+    ])].slice(0, 28);
+
+    const pages = [];
+    for (const t of targets) {
+      const r = await get(t);
+      if (r.status === 200 && (r.text || "").length > 200) {
+        const cmds = [...new Set((r.text.match(/CommandText=\d+[^"'`\s<>\\]*/gi) || []))].slice(0, 50);
+        const i = r.text.search(/disarm|arm[\s_-]*away|arm[\s_-]*stay|\barming\b|\barm\b/i);
+        pages.push({
+          path: t, status: 200, len: r.text.length,
+          title: (r.text.match(/<title[^>]*>([^<]*)/i) || [])[1]?.trim(),
+          commands: cmds,
+          armCtx: i >= 0 ? redact(r.text.slice(Math.max(0, i - 250), i + 450)) : null,
+        });
+      } else pages.push({ path: t, status: r.status || r.error });
+    }
+    pages.sort((a, b) => ((b.commands?.length || 0) - (a.commands?.length || 0)));
+    return { loggedIn: true, homeLinks: links.slice(0, 30), onclicks, pages };
+  })
+);
+
 // GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
 // hosts to guess: the app talks to one server address, which the owner supplies.
 export const geovisionRouter = makeProbeRouter("geovision");
