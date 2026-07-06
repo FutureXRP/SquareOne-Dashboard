@@ -278,9 +278,12 @@ napcoRouter.get(
     const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
     const paths = [
       "/", "/index.html", "/index.htm", "/login", "/login.html", "/home",
+      // ASP.NET / IIS pages (ibridgeonline.com is an IIS site).
+      "/default.aspx", "/Default.aspx", "/login.aspx", "/Login.aspx", "/logon.aspx",
+      "/Account/Login.aspx", "/home.aspx", "/main.aspx", "/panel.aspx",
       "/api", "/api/login", "/api/status", "/api/panel", "/status", "/status.xml",
-      "/cgi-bin/", "/config", "/system", "/device", "/panel", "/arm", "/user",
-      "/ibridge", "/isee", "/app", "/mobile", "/ws", "/ping", "/version",
+      "/config", "/system", "/device", "/panel", "/arm", "/user",
+      "/ibridge", "/isee", "/app", "/mobile", "/version",
     ];
     const out = [];
     for (const p of paths) {
@@ -289,16 +292,17 @@ napcoRouter.get(
         const res = await fetch(`${base}${p}`, { headers: { Accept: "text/html,application/json,*/*" }, redirect: "manual", signal: AbortSignal.timeout(6000) });
         const text = await res.text();
         const title = (text.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1];
-        const forms = (text.match(/<form[^>]*>/gi) || []).slice(0, 3);
-        const inputs = (text.match(/<input[^>]*name=["'][^"']+["'][^>]*>/gi) || [])
-          .map((t) => (t.match(/name=["']([^"']+)["']/i) || [])[1]).filter(Boolean).slice(0, 20);
-        const scripts = [...new Set((text.match(/[\w./-]+\.(?:js|cgi|xml|json)/gi) || []))].slice(0, 15);
+        // Full <form ...> tags (with their action=) + the login field names.
+        const forms = (text.match(/<form[^>]*>/gi) || []).slice(0, 3).map((f) => redact(f).slice(0, 220));
+        const inputs = (text.match(/<input[^>]*>/gi) || [])
+          .map((t) => (t.match(/(?:name|id|type)=["'][^"']+["']/gi) || []).join(" ")).filter(Boolean).slice(0, 25);
+        const scripts = [...new Set((text.match(/[\w./-]+\.(?:js|aspx|asmx|ashx|svc|cgi|xml|json)/gi) || []))].slice(0, 20);
         if (res.status !== 404) out.push({
-          path, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
+          path: p, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
           server: res.headers.get("server") || undefined, title, forms, inputs, scripts,
           location: res.headers.get("location") || undefined,
           ms: Date.now() - started,
-          peek: redact(text).slice(0, 260),
+          peek: redact(text).slice(0, 500),
         });
       } catch (e) { out.push({ path, error: e.message, ms: Date.now() - started }); }
     }
