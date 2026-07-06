@@ -246,16 +246,69 @@ export const pro1Router = makeProbeRouter("pro1", [
   "https://cloud.pro1iaq.com",
 ]);
 
-// Napco Gemini commercial app (StarLink Connect). Registration lives on
-// NapcoComNet; the app's API host isn't published, so probe the likely ones.
-// NAPCO_BASE_URL pins it once the debug output reveals the real host.
+// Napco alarm. This site uses the iBridge / iSee cloud (older Napco platform),
+// with the communicator wired to the LAN over Ethernet. So there are two paths:
+//   1. Local — the module may expose a web/config interface on its LAN IP; set
+//      NAPCO_BASE_URL=http://<module-ip> (port-forwarded like the GV server) and
+//      use /api/napco/probe to crawl it.
+//   2. Cloud — the iBridge app's API host; probe the likely iBridge/iSee hosts.
+// NAPCO_BASE_URL pins whichever the debug output reveals.
 export const napcoRouter = makeProbeRouter("napco", [
+  // iBridge / iSee cloud (older Napco platform — matches this site's module).
+  "https://ibridge.napcosecurity.com",
+  "https://www.ibridge.napcosecurity.com",
+  "https://ibridgeapi.napcosecurity.com",
+  "https://blink.napcosecurity.com",
+  "https://isee.napcosecurity.com",
+  "https://iseevideo.napcosecurity.com",
+  // StarLink / Gemini (kept in case the module reports there too).
   "https://api.napcocomnet.com",
-  "https://gemini.napcocomnet.com",
-  "https://www.napcocomnet.com",
   "https://geminiapp.napcosecurity.com",
   "https://starlinkconnect.napcosecurity.com",
 ]);
+
+// Crawl a Napco base URL (the local module's web interface, or a cloud host) for
+// its login/config/API surface — HTML title, <form>s + input names, script src
+// hints, and common config/api paths — the way we mapped the GV server. Point it
+// at the module's LAN IP (NAPCO_BASE_URL) once that's known.
+napcoRouter.get(
+  "/probe",
+  requireAdmin,
+  guard("napco", async () => {
+    const base = config.napco.baseUrl;
+    if (!base) return { note: "Set NAPCO_BASE_URL to the module's IP (http://192.168.x.x) or the cloud host first." };
+    const redact = (s) => s.replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    const paths = [
+      "/", "/index.html", "/index.htm", "/login", "/login.html", "/home",
+      "/api", "/api/login", "/api/status", "/api/panel", "/status", "/status.xml",
+      "/cgi-bin/", "/config", "/system", "/device", "/panel", "/arm", "/user",
+      "/ibridge", "/isee", "/app", "/mobile", "/ws", "/ping", "/version",
+    ];
+    const out = [];
+    for (const p of paths) {
+      const started = Date.now();
+      try {
+        const res = await fetch(`${base}${p}`, { headers: { Accept: "text/html,application/json,*/*" }, redirect: "manual", signal: AbortSignal.timeout(6000) });
+        const text = await res.text();
+        const title = (text.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1];
+        const forms = (text.match(/<form[^>]*>/gi) || []).slice(0, 3);
+        const inputs = (text.match(/<input[^>]*name=["'][^"']+["'][^>]*>/gi) || [])
+          .map((t) => (t.match(/name=["']([^"']+)["']/i) || [])[1]).filter(Boolean).slice(0, 20);
+        const scripts = [...new Set((text.match(/[\w./-]+\.(?:js|cgi|xml|json)/gi) || []))].slice(0, 15);
+        if (res.status !== 404) out.push({
+          path, status: res.status, ctype: res.headers.get("content-type") || "", len: text.length,
+          server: res.headers.get("server") || undefined, title, forms, inputs, scripts,
+          location: res.headers.get("location") || undefined,
+          ms: Date.now() - started,
+          peek: redact(text).slice(0, 260),
+        });
+      } catch (e) { out.push({ path, error: e.message, ms: Date.now() - started }); }
+    }
+    // Reachable, content-bearing paths first.
+    out.sort((a, b) => ((a.status && a.status < 400 && a.len) ? 0 : 1) - ((b.status && b.status < 400 && b.len) ? 0 : 1));
+    return { base, results: out };
+  })
+);
 
 // GeoVision GV-Access → on-prem GV-ASManager server (GV_BASE_URL). No extra
 // hosts to guess: the app talks to one server address, which the owner supplies.
