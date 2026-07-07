@@ -543,6 +543,56 @@ napcoRouter.get(
   })
 );
 
+// Admin: extract the FULL body of the keypad command functions from Security.aspx
+// (brace-matched, not just windows) so we can read exactly how SendC1Command
+// encodes a keypad keystroke into a DSS CommandText/Params — plus every keypad
+// button's onclick (the key codes for digits + arm/disarm/stay/away). READ-ONLY.
+napcoRouter.get(
+  "/keypad",
+  requireAdmin,
+  guard("napco", async (req) => {
+    const c = config.napco;
+    const { username, secret } = await credsFor(req, "napco").catch(() => ({ username: c.username, secret: c.password }));
+    const { cookie } = await napcoSession(username || c.username, secret || c.password);
+    if (!cookie) return { loggedIn: false };
+    const redact = (s) => (s || "").replace(/[A-Za-z0-9+/=_-]{40,}/g, "…");
+    let html = "";
+    try {
+      const r = await fetch(`${c.baseUrl}/Security.aspx`, { headers: { Cookie: cookie, Accept: "*/*" }, redirect: "manual", signal: AbortSignal.timeout(12000) });
+      html = await r.text();
+    } catch (e) { return { loggedIn: true, error: e.message }; }
+
+    // Pull a whole function body by brace-matching from "function NAME(".
+    const fnBody = (name) => {
+      const start = html.search(new RegExp(`function\\s+${name}\\s*\\(`));
+      if (start < 0) return null;
+      const open = html.indexOf("{", start);
+      if (open < 0) return null;
+      let depth = 0;
+      for (let i = open; i < html.length && i < open + 4000; i++) {
+        if (html[i] === "{") depth++;
+        else if (html[i] === "}") { depth--; if (depth === 0) return redact(html.slice(start, i + 1)).replace(/\s+/g, " "); }
+      }
+      return redact(html.slice(start, open + 1200)).replace(/\s+/g, " ");
+    };
+
+    const funcs = {};
+    for (const n of ["SendC1Command", "ClearC1Command", "SendCommand", "SendAbort", "Send23Command"]) {
+      const b = fnBody(n);
+      if (b) funcs[n] = b;
+    }
+    // Every element whose onclick invokes SendC1Command / a keypad key — these are
+    // the actual arm/disarm/stay/digit buttons and their codes.
+    const keyButtons = [...new Set([...html.matchAll(/onclick\s*=\s*"([^"]*(?:SendC1Command|C1Command|KeyPress|keypad)[^"]*)"/gi)].map((m) => redact(m[1])))].slice(0, 40);
+    // Any literal SendC1Command("..","..") calls hardcoded in the page.
+    const c1Calls = [...new Set([...html.matchAll(/SendC1Command\s*\(\s*["'][^"']*["']\s*,\s*["'][^"']*["']\s*\)/gi)].map((m) => m[0]))].slice(0, 40);
+    // Labels near the keypad (Arm/Stay/Away/Disarm text) to correlate with codes.
+    const labels = [...new Set([...html.matchAll(/>\s*(Arm(?:\s*Away|\s*Stay|\s*Instant|\s*Max)?|Disarm|Stay|Away|Bypass)\s*</gi)].map((m) => m[1].trim()))];
+
+    return { loggedIn: true, functions: funcs, keyButtons, c1Calls, labels };
+  })
+);
+
 // Admin: discover the thermostat / Z-Wave control surface on the SAME iBridge
 // cloud we already log into for the alarm. The IBR-ZREMOTE-W module carries
 // Z-Wave, so the Pro1 thermostats are very likely reachable here (via
