@@ -450,6 +450,7 @@ const PROBES = [
   { key: "napco-js", label: "Napco Alarm — Read Panel Script", path: "/api/napco/panel-js" },
   { key: "napco-status", label: "Napco Alarm — Read Status (safe)", path: "/api/napco/status" },
   { key: "napco-secsrc", label: "Napco Alarm — Dump Security Page JS", path: "/api/napco/security-src" },
+  { key: "napco-keypad", label: "Napco Alarm — Extract Keypad Commands", path: "/api/napco/keypad" },
   { key: "napco-climate", label: "Napco/iBridge — Find Thermostats (Z-Wave)", path: "/api/napco/climate" },
   { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
