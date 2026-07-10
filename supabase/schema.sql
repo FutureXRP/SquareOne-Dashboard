@@ -25,8 +25,10 @@ create table if not exists locations (
 create table if not exists profiles (
   id          uuid primary key references auth.users(id) on delete cascade,
   full_name   text,
+  entity      text,                              -- 'medical' | 'interactive' | 'elc' (staff scoping)
   created_at  timestamptz not null default now()
 );
+alter table profiles add column if not exists entity text;
 
 -- A user's role at a given location (multi-location access).
 create table if not exists user_locations (
@@ -128,12 +130,14 @@ create table if not exists invites (
   email       text primary key,                 -- lower-cased work email
   role        app_role not null default 'staff',
   name        text,                              -- preferred/display name set by admin
+  entity      text,                              -- 'medical' | 'interactive' | 'elc'
   tabs        jsonb,                             -- optional per-person tab override
   invited_by  uuid references auth.users(id) on delete set null,
   created_at  timestamptz not null default now()
 );
--- If the invites table pre-dates the name column, add it.
+-- If the invites table pre-dates these columns, add them.
 alter table invites add column if not exists name text;
+alter table invites add column if not exists entity text;
 
 -- ---------------------------------------------------------------------------
 -- App-wide settings (key/value). Holds the role-based tab "buckets" under key

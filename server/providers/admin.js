@@ -5,6 +5,9 @@ import { config } from "../config.js";
 
 export const adminRouter = Router();
 
+// Business entities a staffer can belong to (scopes which tabs they see).
+const ENTITIES = ["medical", "interactive", "elc"];
+
 /*
   Admin-only team management. Mounted behind requireAuth + requireAdmin, so every
   route here already has an authenticated admin (req.user). Uses the Supabase
@@ -80,14 +83,15 @@ adminRouter.get("/users", async (_req, res) => {
     const ids = users.map((u) => u.id);
     const locs = ids.length ? await safe("user_locations", supabaseAdmin.from("user_locations").select("user_id, role").in("user_id", ids)) : [];
     const prefs = ids.length ? await safe("user_prefs", supabaseAdmin.from("user_prefs").select("user_id, prefs").in("user_id", ids)) : [];
-    const profs = ids.length ? await safe("profiles", supabaseAdmin.from("profiles").select("id, full_name").in("id", ids)) : [];
-    const invites = await safe("invites", supabaseAdmin.from("invites").select("email, role, name, created_at").order("created_at", { ascending: false }));
+    const profs = ids.length ? await safe("profiles", supabaseAdmin.from("profiles").select("id, full_name, entity").in("id", ids)) : [];
+    const invites = await safe("invites", supabaseAdmin.from("invites").select("email, role, name, entity, created_at").order("created_at", { ascending: false }));
     let roleTabs = {};
     try { roleTabs = await getRoleTabs(); } catch (e) { warnings.push(`app_settings: ${e.message}`); }
     const roleBy = new Map();
     (locs || []).forEach((r) => { const cur = roleBy.get(r.user_id); if (cur !== "admin") roleBy.set(r.user_id, r.role); });
     const prefBy = new Map((prefs || []).map((p) => [p.user_id, p.prefs || {}]));
     const nameBy = new Map((profs || []).map((p) => [p.id, p.full_name]));
+    const entityBy = new Map((profs || []).map((p) => [p.id, p.entity]));
     // A profile's full_name defaults to the email on signup — treat that as "no
     // preferred name set" so the UI shows a placeholder rather than the raw email.
     const preferredName = (u) => { const n = nameBy.get(u.id); return n && n !== u.email ? n : null; };
@@ -95,7 +99,7 @@ adminRouter.get("/users", async (_req, res) => {
     // stragglers who signed in before invite-only or were never authorized.
     const activeUsers = users
       .filter((u) => roleBy.has(u.id))
-      .map((u) => ({ id: u.id, email: u.email, name: preferredName(u), role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
+      .map((u) => ({ id: u.id, email: u.email, name: preferredName(u), entity: entityBy.get(u.id) || null, role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
     res.json({ ok: true, data: { users: activeUsers, invites: invites || [], roleTabs, warnings } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -106,6 +110,7 @@ adminRouter.post("/invites", async (req, res) => {
   const email = String((req.body && req.body.email) || "").trim().toLowerCase();
   const role = (req.body && req.body.role) || "staff";
   const name = String((req.body && req.body.name) || "").trim() || null;
+  const entity = ENTITIES.includes(req.body?.entity) ? req.body.entity : null;
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "A valid email is required." });
   if (!["staff", "manager", "admin"].includes(role)) return res.status(400).json({ ok: false, message: "Invalid role." });
   try {
@@ -115,17 +120,17 @@ adminRouter.post("/invites", async (req, res) => {
     if (existing) {
       const loc = await firstLocationId();
       await supabaseAdmin.from("user_locations").upsert({ user_id: existing.id, location_id: loc, role }, { onConflict: "user_id,location_id" });
-      if (name) await supabaseAdmin.from("profiles").upsert({ id: existing.id, full_name: name }, { onConflict: "id" });
-      logAudit(req, "admin.set-role", existing.id, { email, role });
+      if (name || entity) await supabaseAdmin.from("profiles").upsert({ id: existing.id, ...(name ? { full_name: name } : {}), entity }, { onConflict: "id" });
+      logAudit(req, "admin.set-role", existing.id, { email, role, entity });
       return res.json({ ok: true, data: { email, role, status: "active" } });
     }
-    await supabaseAdmin.from("invites").upsert({ email, role, name, invited_by: req.user.id }, { onConflict: "email" });
-    logAudit(req, "admin.invite", email, { role });
+    await supabaseAdmin.from("invites").upsert({ email, role, name, entity, invited_by: req.user.id }, { onConflict: "email" });
+    logAudit(req, "admin.invite", email, { role, entity });
     res.json({ ok: true, data: { email, role, status: "invited" } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
-// PUT /api/admin/invites/:email { role?, name? } — edit a pending invite.
+// PUT /api/admin/invites/:email { role?, name?, entity? } — edit a pending invite.
 adminRouter.put("/invites/:email", async (req, res) => {
   const email = String(req.params.email || "").toLowerCase();
   const patch = {};
@@ -134,6 +139,7 @@ adminRouter.put("/invites/:email", async (req, res) => {
     patch.role = req.body.role;
   }
   if (req.body?.name !== undefined) patch.name = String(req.body.name || "").trim() || null;
+  if (req.body?.entity !== undefined) patch.entity = ENTITIES.includes(req.body.entity) ? req.body.entity : null;
   if (!Object.keys(patch).length) return res.status(400).json({ ok: false, message: "Nothing to update." });
   try {
     await supabaseAdmin.from("invites").update(patch).eq("email", email);
@@ -148,6 +154,16 @@ adminRouter.put("/users/:id/name", async (req, res) => {
   try {
     await supabaseAdmin.from("profiles").upsert({ id: req.params.id, full_name: name }, { onConflict: "id" });
     logAudit(req, "admin.set-name", req.params.id, { name });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// PUT /api/admin/users/:id/entity { entity } — set a person's entity (staff scoping).
+adminRouter.put("/users/:id/entity", async (req, res) => {
+  const entity = ENTITIES.includes(req.body?.entity) ? req.body.entity : null;
+  try {
+    await supabaseAdmin.from("profiles").upsert({ id: req.params.id, entity }, { onConflict: "id" });
+    logAudit(req, "admin.set-entity", req.params.id, { entity });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });

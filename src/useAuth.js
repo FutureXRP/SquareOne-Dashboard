@@ -17,6 +17,7 @@ export function useAuth() {
   const [role, setRole] = useState(null);
   const [status, setStatus] = useState(null);   // "active" | "no-access" | "open"
   const [roleTabs, setRoleTabs] = useState({}); // role-based tab buckets
+  const [entity, setEntity] = useState(null);   // staff scoping: medical | interactive | elc
   const [loading, setLoading] = useState(supabaseEnabled);
 
   useEffect(() => {
@@ -49,6 +50,7 @@ export function useAuth() {
         setRole(r?.data?.role ?? null);
         setStatus(r?.data?.status ?? "no-access");
         setRoleTabs(r?.data?.roleTabs ?? {});
+        setEntity(r?.data?.entity ?? null);
       } catch {
         if (!cancelled) { setRole(null); setStatus("no-access"); }
       }
@@ -72,6 +74,7 @@ export function useAuth() {
     role,
     status,
     roleTabs,
+    entity,
     // Authenticated with Microsoft but not authorized (no invite / no role).
     noAccess: supabaseEnabled && Boolean(session) && status === "no-access",
     loading,
