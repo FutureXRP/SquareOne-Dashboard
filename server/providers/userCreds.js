@@ -36,9 +36,11 @@ meRouter.post("/provision", requireAuth, async (req, res) => {
 
     // 3. Claim an invite.
     if (!role && email) {
-      const { data: inv } = await supabaseAdmin.from("invites").select("role, tabs").eq("email", email).maybeSingle();
+      const { data: inv } = await supabaseAdmin.from("invites").select("role, tabs, name").eq("email", email).maybeSingle();
       if (inv) {
         await grant(inv.role);
+        // Carry the preferred name the admin set onto the new profile.
+        if (inv.name) await supabaseAdmin.from("profiles").upsert({ id: req.user.id, full_name: inv.name }, { onConflict: "id" });
         if (inv.tabs && typeof inv.tabs === "object") {
           const { data: pref } = await supabaseAdmin.from("user_prefs").select("prefs").eq("user_id", req.user.id).maybeSingle();
           await supabaseAdmin.from("user_prefs").upsert(

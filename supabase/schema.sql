@@ -127,10 +127,13 @@ create table if not exists user_prefs (
 create table if not exists invites (
   email       text primary key,                 -- lower-cased work email
   role        app_role not null default 'staff',
+  name        text,                              -- preferred/display name set by admin
   tabs        jsonb,                             -- optional per-person tab override
   invited_by  uuid references auth.users(id) on delete set null,
   created_at  timestamptz not null default now()
 );
+-- If the invites table pre-dates the name column, add it.
+alter table invites add column if not exists name text;
 
 -- ---------------------------------------------------------------------------
 -- App-wide settings (key/value). Holds the role-based tab "buckets" under key
