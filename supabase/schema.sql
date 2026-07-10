@@ -145,6 +145,23 @@ create table if not exists app_settings (
 );
 
 -- ---------------------------------------------------------------------------
+-- Internal team chat. One shared 'group' channel plus 1:1 DMs between any two
+-- people with access. DM channels are keyed 'dm:<idA>:<idB>' with the two ids
+-- sorted, so a pair always maps to one channel. SERVICE-ROLE ONLY — all reads
+-- and writes go through /api/chat, which builds DM channels from the caller's
+-- own id (so you can only ever touch conversations you're part of).
+-- ---------------------------------------------------------------------------
+create table if not exists chat_messages (
+  id            uuid primary key default gen_random_uuid(),
+  channel       text not null,                 -- 'group' | 'dm:<idA>:<idB>'
+  sender_id     uuid not null references auth.users(id) on delete cascade,
+  sender_email  text,
+  body          text not null,
+  created_at    timestamptz not null default now()
+);
+create index if not exists chat_messages_channel_idx on chat_messages (channel, created_at);
+
+-- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location
 -- ---------------------------------------------------------------------------
 create or replace function role_at(loc uuid)
@@ -186,6 +203,7 @@ alter table user_credentials    enable row level security;  -- no policies = ser
 alter table user_prefs          enable row level security;  -- no policies = service-role only
 alter table invites             enable row level security;  -- no policies = service-role only
 alter table app_settings        enable row level security;  -- no policies = service-role only
+alter table chat_messages       enable row level security;  -- no policies = service-role only
 
 -- Profiles: a user sees/edits their own; admins see all.
 create policy profiles_self on profiles

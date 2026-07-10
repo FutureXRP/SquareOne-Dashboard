@@ -160,6 +160,11 @@ export const config = {
       token: process.env.TWILIO_AUTH_TOKEN || "",
       from: process.env.TWILIO_FROM || "",
     },
+    // New-member email/SMS blasts are OFF by default — the dashboard still shows
+    // every sign-up in-app (the Members-page congrats popup + Alerts feed), which
+    // is what the team actually watches. Set NOTIFY_NEW_MEMBERS=true to also send
+    // the email/SMS on each new member.
+    notifyNewMembers: /^(1|true|yes)$/i.test(process.env.NOTIFY_NEW_MEMBERS || ""),
     get emailConfigured() {
       return Boolean(this.email && this.resendKey);
     },
