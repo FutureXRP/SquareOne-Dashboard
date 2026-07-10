@@ -173,12 +173,19 @@ create index if not exists chat_messages_channel_idx on chat_messages (channel, 
 create table if not exists elc_counts (
   date          date not null,
   room          text not null,                 -- room id (see ELC_ROOMS)
-  present       integer not null,
+  present       integer not null default 0,    -- total = private + dhs + tribal
+  private       integer not null default 0,    -- children by funding source
+  dhs           integer not null default 0,
+  tribal        integer not null default 0,
   updated_by    uuid references auth.users(id) on delete set null,
   updated_email text,
   updated_at    timestamptz not null default now(),
   primary key (date, room)
 );
+-- If elc_counts pre-dates the funding-source columns, add them.
+alter table elc_counts add column if not exists private integer not null default 0;
+alter table elc_counts add column if not exists dhs    integer not null default 0;
+alter table elc_counts add column if not exists tribal integer not null default 0;
 
 -- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location

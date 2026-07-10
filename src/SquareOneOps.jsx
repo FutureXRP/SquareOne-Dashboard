@@ -5,12 +5,14 @@ import {
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
   DoorOpen, Building2, TrendingUp, LogOut, DollarSign, Settings, KeyRound, Loader2, Check, Trash2,
-  LayoutGrid, Eye, EyeOff, ArrowLeft, ArrowRight, Pencil, MessageSquare,
+  LayoutGrid, Eye, EyeOff, ArrowLeft, ArrowRight, Pencil, MessageSquare, Mail, Link2,
 } from "lucide-react";
 import { usePrefs } from "./usePrefs.js";
 
 // Compact currency, e.g. 1575 -> "$1,575". Non-numbers pass through as "$0".
 const fmtMoney = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+// Currency with cents, e.g. 1100.55 -> "$1,100.55". For reimbursement rates/revenue.
+const fmtUSD = (n) => "$" + (Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 import { useDashboardData } from "./useDashboardData.js";
 import { apiFetch, authToken } from "./lib/api.js";
 import { useHub } from "./useHub.js";
@@ -606,6 +608,20 @@ function TeamPanel() {
   };
   const cancelInvite = async (email) => { await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}`, { method: "DELETE" }); load(); };
   const updateInvite = async (email, patch) => { await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }); load(); };
+  const [inviteMsg, setInviteMsg] = useState(null); // { email, ok, text }
+  const sendInvite = async (email) => {
+    setInviteMsg({ email, ok: null, text: "Sending…" });
+    try {
+      const r = await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}/send`, { method: "POST" }).then((res) => res.json());
+      setInviteMsg({ email, ok: r.ok, text: r.ok ? "Invite email sent." : (r.message || "Couldn't send.") });
+    } catch (e) { setInviteMsg({ email, ok: false, text: e.message }); }
+  };
+  const copyInvite = async (email) => {
+    const url = window.location.origin;
+    const text = `You've been given access to the SquareOne Operations dashboard.\n\nSign in here: ${url}\nClick "Sign in with Microsoft" and use your work email (${email}). No new password needed.`;
+    try { await navigator.clipboard.writeText(text); setInviteMsg({ email, ok: true, text: "Invite text copied — paste it into an email or Teams." }); }
+    catch { setInviteMsg({ email, ok: false, text: "Couldn't copy to clipboard." }); }
+  };
   const setRole = async (id, role) => { await apiFetch(`/api/admin/users/${id}/role`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }); load(); };
   const setUserName = async (id, name) => { await apiFetch(`/api/admin/users/${id}/name`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); load(); };
   const setUserTab = async (u, id, on) => {
@@ -663,18 +679,25 @@ function TeamPanel() {
         <div style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Invited · waiting for first sign-in</div>
           {invites.map((iv) => (
-            <div key={iv.email} className="flex items-center justify-between gap-3" style={{ padding: "8px 0" }}>
-              <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                <Clock size={14} color={C.amber} title="Waiting for first sign-in" />
-                <div style={{ minWidth: 0 }}>
-                  <NameEdit value={iv.name} onSave={(name) => updateInvite(iv.email, { name })} />
-                  <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{iv.email}</div>
+            <div key={iv.email}>
+              <div className="flex items-center justify-between gap-3" style={{ padding: "8px 0" }}>
+                <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                  <Clock size={14} color={C.amber} />
+                  <div style={{ minWidth: 0 }}>
+                    <NameEdit value={iv.name} onSave={(name) => updateInvite(iv.email, { name })} />
+                    <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{iv.email}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {RolePicker(iv.role, (role) => updateInvite(iv.email, { role }))}
+                  <button onClick={() => sendInvite(iv.email)} className="so-btn" title="Email sign-in invite" style={{ padding: "6px 9px", borderRadius: 7, color: C.cyan, borderColor: C.border }}><Mail size={13} /></button>
+                  <button onClick={() => copyInvite(iv.email)} className="so-btn" title="Copy invite link" style={{ padding: "6px 9px", borderRadius: 7, color: C.mid, borderColor: C.border }}><Link2 size={13} /></button>
+                  <button onClick={() => cancelInvite(iv.email)} className="so-btn" title="Cancel invite" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {RolePicker(iv.role, (role) => updateInvite(iv.email, { role }))}
-                <button onClick={() => cancelInvite(iv.email)} className="so-btn" title="Cancel invite" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
-              </div>
+              {inviteMsg?.email === iv.email && (
+                <div style={{ fontSize: 11.5, fontFamily: mono, color: inviteMsg.ok === null ? C.mid : inviteMsg.ok ? C.go : C.red, paddingBottom: 8, paddingLeft: 22 }}>{inviteMsg.text}</div>
+              )}
             </div>
           ))}
         </div>
@@ -1917,23 +1940,30 @@ function CameraTile({ c, snapshotUrl, liveEnabled, arranging, isHidden, onLive, 
   );
 }
 
-/* ----------------------------- ELC (ProCare) ----------------------------- */
-// Early Learning Center — manual daily attendance. Staff type each room's
-// morning headcount into a box; entries auto-save and are shared across the team
-// (server/providers/elc.js). No ProCare API.
+/* ----------------------------- ELC ----------------------------- */
+// Early Learning Center — manual daily attendance by funding source (Private /
+// DHS / Tribal) with a live revenue forecast. Staff type each room's counts; they
+// auto-save, are shared across the team, and drive projected daily/monthly
+// revenue from the per-room reimbursement rates (server/providers/elc.js).
+const ELC_FUND = [["private", "Private"], ["dhs", "DHS"], ["tribal", "Tribal"]];
+
 function Elc() {
   const [data, setData] = useState(null);      // { date, rooms, totals, lastUpdated }
-  const [vals, setVals] = useState({});        // roomId -> input string
+  const [vals, setVals] = useState({});        // roomId -> { private, dhs, tribal } strings
   const [status, setStatus] = useState({});    // roomId -> 'saving'|'saved'|'error'
-  const dirty = useRef(new Set());             // rooms with unsaved local edits
-  const timers = useRef({});                   // per-room debounce timers
+  const dirty = useRef(new Set());             // `${roomId}:${type}` with unsaved edits
+  const timers = useRef({});                   // per-field debounce timers
 
   // Merge server data in, but never clobber a box the user is mid-edit on.
   const applyServer = (d) => {
     setData(d);
     setVals((prev) => {
       const next = { ...prev };
-      d.rooms.forEach((r) => { if (!dirty.current.has(r.id)) next[r.id] = r.present === null ? "" : String(r.present); });
+      d.rooms.forEach((r) => {
+        const cur = { ...(next[r.id] || {}) };
+        ELC_FUND.forEach(([t]) => { if (!dirty.current.has(`${r.id}:${t}`)) cur[t] = r[t] === null ? "" : String(r[t]); });
+        next[r.id] = cur;
+      });
       return next;
     });
   };
@@ -1946,90 +1976,126 @@ function Elc() {
     return () => { stop = true; clearInterval(id); };
   }, []);
 
-  const save = async (roomId, raw) => {
+  const save = async (roomId, type, raw) => {
+    const k = `${roomId}:${type}`;
     setStatus((s) => ({ ...s, [roomId]: "saving" }));
-    const present = raw === "" ? null : Number(raw);
     try {
       const r = await apiFetch("/api/elc/counts", {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room: roomId, present }),
+        body: JSON.stringify({ room: roomId, [type]: raw === "" ? 0 : Number(raw) }),
       }).then((res) => res.json());
       if (r.ok) {
-        dirty.current.delete(roomId);
+        dirty.current.delete(k);
         setStatus((s) => ({ ...s, [roomId]: "saved" }));
-        setTimeout(() => setStatus((s) => ({ ...s, [roomId]: undefined })), 1600);
+        setTimeout(() => setStatus((s) => ({ ...s, [roomId]: undefined })), 1500);
       } else setStatus((s) => ({ ...s, [roomId]: "error" }));
     } catch { setStatus((s) => ({ ...s, [roomId]: "error" })); }
   };
-  const onType = (roomId, raw) => {
+  const onType = (roomId, type, raw) => {
     const clean = raw.replace(/[^0-9]/g, "").slice(0, 3);
-    dirty.current.add(roomId);
-    setVals((v) => ({ ...v, [roomId]: clean }));
-    clearTimeout(timers.current[roomId]);
-    timers.current[roomId] = setTimeout(() => save(roomId, clean), 600);
+    const k = `${roomId}:${type}`;
+    dirty.current.add(k);
+    setVals((v) => ({ ...v, [roomId]: { ...(v[roomId] || {}), [type]: clean } }));
+    clearTimeout(timers.current[k]);
+    timers.current[k] = setTimeout(() => save(roomId, type, clean), 600);
   };
-  const step = (roomId, delta) => {
-    const nv = String(Math.max(0, Number(vals[roomId] || 0) + delta));
-    dirty.current.add(roomId);
-    setVals((v) => ({ ...v, [roomId]: nv }));
-    clearTimeout(timers.current[roomId]);
-    save(roomId, nv);
+  const blurSave = (roomId, type) => {
+    const k = `${roomId}:${type}`;
+    clearTimeout(timers.current[k]);
+    if (dirty.current.has(k)) save(roomId, type, vals[roomId]?.[type] ?? "");
   };
 
   if (!data)
     return <Panel title="Early Learning Center"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Loading…</div></Panel>;
 
-  const t = data.totals;
+  // Live figures computed from what's typed (instant), using the server's rates.
+  const wd = data.totals.workingDays || 21.75;
+  const num = (id, t) => { const v = vals[id]?.[t]; return v === "" || v === undefined ? 0 : Number(v) || 0; };
+  const rooms = data.rooms.map((r) => {
+    const p = num(r.id, "private"), d = num(r.id, "dhs"), tr = num(r.id, "tribal");
+    const present = p + d + tr;
+    const monthly = p * r.rates.private + d * r.rates.dhs + tr * r.rates.tribal;
+    return { ...r, p, d, tr, present, monthly, daily: monthly / wd };
+  });
+  const tot = rooms.reduce((a, r) => ({
+    present: a.present + r.present, private: a.private + r.p, dhs: a.dhs + r.d, tribal: a.tribal + r.tr, monthly: a.monthly + r.monthly,
+  }), { present: 0, private: 0, dhs: 0, tribal: 0, monthly: 0 });
+  const capacity = data.totals.capacity;
+  const entered = rooms.filter((r) => r.present > 0).length;
   const dateLabel = new Date(data.date + "T12:00:00").toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+  const stTxt = (st) => st === "saving" ? "saving…" : st === "saved" ? "saved ✓" : st === "error" ? "retry" : "";
+  const stCol = (st) => st === "saved" ? C.go : st === "error" ? C.red : C.mid;
+  const cell = { width: 54, textAlign: "center", fontSize: 16, fontWeight: 700, fontFamily: mono, padding: "6px 4px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.panel2, color: C.text, outline: "none" };
+  const th = { padding: "6px 8px", color: C.dim, fontFamily: mono, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5 };
+
   return (
     <div className="grid gap-3">
       {data.dbError && (
         <div style={{ padding: "10px 12px", background: C.redBg, border: `1px solid ${C.red}`, borderRadius: 8, fontSize: 12.5, color: C.red, fontFamily: mono }}>
-          Attendance store unavailable — entries won't save yet. Run the <strong>elc_counts</strong> table SQL in your Supabase SQL Editor. ({data.dbError})
+          Attendance store unavailable — entries won't save yet. Run the <strong>elc_counts</strong> table SQL (with the private/dhs/tribal columns) in your Supabase SQL Editor. ({data.dbError})
         </div>
       )}
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-        <Stat label="Children present" value={t.present} sub={`of ${t.capacity} capacity`} icon={Baby} color={C.cyan} />
-        <Stat label="Rooms entered" value={`${t.entered}/${t.roomCount}`} sub="today" icon={CircleCheck} color={t.entered === t.roomCount ? C.go : C.amber} />
-        <Stat label="Teachers" value={t.teachers} sub="2 per room" icon={UserCheck} color={C.cyan} />
-        <Stat label="Open spots" value={Math.max(0, t.capacity - t.present)} sub="remaining" icon={Users} color={C.go} />
+        <Stat label="Children present" value={tot.present} sub={`of ${capacity} capacity`} icon={Baby} color={C.cyan} />
+        <Stat label="Projected daily" value={fmtUSD(tot.monthly / wd)} sub={`${wd} days/mo`} icon={DollarSign} color={C.go} />
+        <Stat label="Projected monthly" value={fmtUSD(tot.monthly)} sub="all funding" icon={TrendingUp} color={C.go} />
+        <Stat label="Rooms entered" value={`${entered}/${data.totals.roomCount}`} sub="today" icon={CircleCheck} color={entered === data.totals.roomCount ? C.go : C.amber} />
       </div>
-      <Panel title={`Daily Attendance — ${dateLabel}`} accent={C.cyan}
+      <Panel title={`Daily Attendance & Revenue — ${dateLabel}`} accent={C.cyan}
         right={<span style={{ fontSize: 11, fontFamily: mono, color: C.dim }}>{data.lastUpdated ? `updated ${new Date(data.lastUpdated).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "no entries yet"}</span>}>
-        {data.rooms.map((r) => {
-          const val = vals[r.id] ?? "";
-          const n = val === "" ? null : Number(val);
-          const full = n !== null && n >= r.capacity;
-          const over = n !== null && n > r.capacity;
-          const pct = n === null ? 0 : Math.min(100, (n / r.capacity) * 100);
-          const st = status[r.id];
-          return (
-            <div key={r.id} className="flex items-center gap-3" style={{ padding: "12px 0", borderBottom: `1px solid ${C.border}` }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</div>
-                <div style={{ fontSize: 12, color: C.dim, fontFamily: mono }}>{r.teachers} teachers · capacity {r.capacity}</div>
-                <div style={{ height: 6, background: C.panel2, borderRadius: 99, overflow: "hidden", marginTop: 6, maxWidth: 280 }}>
-                  <div style={{ width: `${pct}%`, height: "100%", background: over ? C.red : full ? C.amber : C.go, borderRadius: 99, transition: "width .2s" }} />
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button onClick={() => step(r.id, -1)} className="so-btn" style={{ width: 34, height: 34, borderRadius: 8, display: "grid", placeItems: "center" }} aria-label={`fewer in ${r.name}`}><ChevronDown size={16} /></button>
-                <input value={val} onChange={(e) => onType(r.id, e.target.value)}
-                  onBlur={() => { clearTimeout(timers.current[r.id]); if (dirty.current.has(r.id)) save(r.id, val); }}
-                  inputMode="numeric" placeholder="—" aria-label={`children present in ${r.name}`}
-                  style={{ width: 66, textAlign: "center", fontSize: 20, fontWeight: 700, fontFamily: mono, padding: "6px 4px", borderRadius: 8, border: `1px solid ${over ? C.red : C.border}`, background: C.panel2, color: over ? C.red : C.text, outline: "none" }} />
-                <button onClick={() => step(r.id, 1)} className="so-btn" style={{ width: 34, height: 34, borderRadius: 8, display: "grid", placeItems: "center" }} aria-label={`more in ${r.name}`}><ChevronUp size={16} /></button>
-                <span style={{ width: 60, fontSize: 11, fontFamily: mono, color: st === "saved" ? C.go : st === "error" ? C.red : st === "saving" ? C.mid : over ? C.red : C.dim }}>
-                  {st === "saving" ? "saving…" : st === "saved" ? "saved ✓" : st === "error" ? "retry" : over ? "over!" : full ? "full" : `of ${r.capacity}`}
-                </span>
-              </div>
-            </div>
-          );
-        })}
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+            <thead>
+              <tr style={{ textAlign: "left" }}>
+                <th style={th}>Classroom</th>
+                {ELC_FUND.map(([t, label]) => <th key={t} style={{ ...th, textAlign: "center" }}>{label}</th>)}
+                <th style={{ ...th, textAlign: "center" }}>Children</th>
+                <th style={{ ...th, textAlign: "right" }}>Monthly</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rooms.map((r) => {
+                const over = r.present > r.capacity;
+                return (
+                  <tr key={r.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "10px 8px", minWidth: 180 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{r.name}</div>
+                      <div style={{ fontSize: 10.5, color: C.dim, fontFamily: mono }}>cap {r.capacity} · P {fmtUSD(r.rates.private)} · D {fmtUSD(r.rates.dhs)} · T {fmtUSD(r.rates.tribal)}</div>
+                    </td>
+                    {ELC_FUND.map(([t]) => (
+                      <td key={t} style={{ padding: "8px", textAlign: "center" }}>
+                        <input value={vals[r.id]?.[t] ?? ""} onChange={(e) => onType(r.id, t, e.target.value)} onBlur={() => blurSave(r.id, t)}
+                          inputMode="numeric" placeholder="0" aria-label={`${t} in ${r.name}`} style={cell} />
+                      </td>
+                    ))}
+                    <td style={{ padding: "8px", textAlign: "center", fontFamily: mono, fontWeight: 700, color: over ? C.red : C.text }}>
+                      {r.present}<span style={{ color: C.dim, fontWeight: 400 }}>/{r.capacity}</span>
+                    </td>
+                    <td style={{ padding: "8px", textAlign: "right", fontFamily: mono, fontWeight: 600 }}>
+                      {fmtUSD(r.monthly)}
+                      {status[r.id] && <div style={{ fontSize: 10, color: stCol(status[r.id]) }}>{stTxt(status[r.id])}</div>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: `2px solid ${C.borderHi}`, fontWeight: 700 }}>
+                <td style={{ padding: "10px 8px" }}>Totals</td>
+                <td style={{ textAlign: "center", fontFamily: mono }}>{tot.private}</td>
+                <td style={{ textAlign: "center", fontFamily: mono }}>{tot.dhs}</td>
+                <td style={{ textAlign: "center", fontFamily: mono }}>{tot.tribal}</td>
+                <td style={{ textAlign: "center", fontFamily: mono }}>{tot.present}</td>
+                <td style={{ textAlign: "right", fontFamily: mono, color: C.go }}>{fmtUSD(tot.monthly)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div style={{ fontSize: 12, color: C.mid, fontFamily: mono, paddingTop: 12, lineHeight: 1.5 }}>
+          Projected <strong>monthly</strong> revenue = children × each room's monthly reimbursement rate.
+          <strong> Daily</strong> = monthly ÷ {wd} working days. Entries auto-save and are shared across the team.
+        </div>
       </Panel>
-      <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, padding: "0 2px" }}>
-        Staff-entered daily counts — everyone with access sees the same numbers. Entries save automatically; each morning starts fresh.
-      </div>
     </div>
   );
 }

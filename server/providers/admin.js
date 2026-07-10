@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { supabaseAdmin, logAudit, firstLocationId } from "../auth.js";
 import { getRoleTabs } from "./userCreds.js";
+import { config } from "../config.js";
 
 export const adminRouter = Router();
 
@@ -148,6 +149,34 @@ adminRouter.put("/users/:id/name", async (req, res) => {
     await supabaseAdmin.from("profiles").upsert({ id: req.params.id, full_name: name }, { onConflict: "id" });
     logAudit(req, "admin.set-name", req.params.id, { name });
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// POST /api/admin/invites/:email/send — email the person a sign-in invite via
+// Resend. Note: inviting doesn't otherwise send anything (access is granted when
+// they sign in with Microsoft) — this is an explicit "here's how to get in" note.
+adminRouter.post("/invites/:email/send", async (req, res) => {
+  const email = String(req.params.email || "").toLowerCase();
+  if (!config.alerts.resendKey) return res.status(400).json({ ok: false, message: "No email service configured (set RESEND_API_KEY)." });
+  try {
+    const { data: inv } = await supabaseAdmin.from("invites").select("role, name").eq("email", email).maybeSingle();
+    const base = process.env.APP_URL || `https://${req.get("host")}`;
+    const first = inv?.name ? inv.name.split(" ")[0] : "there";
+    const role = inv?.role || "staff";
+    const subject = "Your SquareOne Operations dashboard access";
+    const text = `Hi ${first},\n\nYou've been given ${role} access to the SquareOne Operations dashboard.\n\nTo sign in:\n1. Go to ${base}\n2. Click "Sign in with Microsoft"\n3. Use your work email (${email}) — no new password needed.\n\nThat's it — see you inside.\n— SquareOne Compassion`;
+    const r = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.alerts.resendKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: config.alerts.emailFrom, to: [email], subject, text }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body?.error) {
+      const m = body?.error?.message || body?.message || `Email service returned ${r.status}.`;
+      return res.status(502).json({ ok: false, message: m });
+    }
+    logAudit(req, "admin.invite-email", email, {});
+    res.json({ ok: true, data: { email, sent: true } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
