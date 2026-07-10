@@ -1942,6 +1942,11 @@ function Elc() {
   const dateLabel = new Date(data.date + "T12:00:00").toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   return (
     <div className="grid gap-3">
+      {data.dbError && (
+        <div style={{ padding: "10px 12px", background: C.redBg, border: `1px solid ${C.red}`, borderRadius: 8, fontSize: 12.5, color: C.red, fontFamily: mono }}>
+          Attendance store unavailable — entries won't save yet. Run the <strong>elc_counts</strong> table SQL in your Supabase SQL Editor. ({data.dbError})
+        </div>
+      )}
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
         <Stat label="Children present" value={t.present} sub={`of ${t.capacity} capacity`} icon={Baby} color={C.cyan} />
         <Stat label="Rooms entered" value={`${t.entered}/${t.roomCount}`} sub="today" icon={CircleCheck} color={t.entered === t.roomCount ? C.go : C.amber} />

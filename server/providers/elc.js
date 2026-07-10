@@ -28,17 +28,24 @@ export const ELC_ROOMS = [
 
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s || "");
 // "Today" in the org's timezone (server runs in UTC) — en-CA gives YYYY-MM-DD.
-const todayStr = () => new Date().toLocaleDateString("en-CA", { timeZone: config.timezone });
+// Falls back to UTC if the configured timezone is somehow invalid.
+const todayStr = () => {
+  try { return new Date().toLocaleDateString("en-CA", { timeZone: config.timezone }); }
+  catch { return new Date().toISOString().slice(0, 10); }
+};
 
 // In-memory fallback for local/preview (no Supabase). key `${date}:${room}`.
 const memStore = new Map();
 
 // GET /api/elc/today[?date=YYYY-MM-DD] — the roster merged with the day's counts.
+// Never 500s: if the store can't be read (e.g. the elc_counts table hasn't been
+// created yet), the roster still renders and the DB error is surfaced in dbError.
 elcRouter.get("/today", async (req, res) => {
   const date = isDate(req.query.date) ? req.query.date : todayStr();
+  const counts = new Map();
+  let lastUpdated = null;
+  let dbError = null;
   try {
-    const counts = new Map();
-    let lastUpdated = null;
     if (supabaseAdmin) {
       const { data, error } = await supabaseAdmin.from("elc_counts")
         .select("room, present, updated_at, updated_email").eq("date", date);
@@ -50,22 +57,22 @@ elcRouter.get("/today", async (req, res) => {
         if (v) { counts.set(r.id, v); if (!lastUpdated || v.updated_at > lastUpdated) lastUpdated = v.updated_at; }
       }
     }
-    const rooms = ELC_ROOMS.map((r) => ({
-      id: r.id, name: r.name, teachers: r.teachers, capacity: r.capacity,
-      present: counts.get(r.id)?.present ?? null,          // null = not entered yet
-      updatedAt: counts.get(r.id)?.updated_at ?? null,
-      updatedBy: counts.get(r.id)?.updated_email ?? null,
-    }));
-    const present = rooms.reduce((s, r) => s + (r.present || 0), 0);
-    const capacity = rooms.reduce((s, r) => s + r.capacity, 0);
-    const totals = {
-      present, capacity,
-      teachers: ELC_ROOMS.reduce((s, r) => s + r.teachers, 0),
-      entered: rooms.filter((r) => r.present !== null).length,
-      roomCount: ELC_ROOMS.length,
-    };
-    res.json({ ok: true, data: { date, rooms, totals, lastUpdated } });
-  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+  } catch (e) { dbError = e.message; }
+  const rooms = ELC_ROOMS.map((r) => ({
+    id: r.id, name: r.name, teachers: r.teachers, capacity: r.capacity,
+    present: counts.get(r.id)?.present ?? null,            // null = not entered yet
+    updatedAt: counts.get(r.id)?.updated_at ?? null,
+    updatedBy: counts.get(r.id)?.updated_email ?? null,
+  }));
+  const present = rooms.reduce((s, r) => s + (r.present || 0), 0);
+  const capacity = rooms.reduce((s, r) => s + r.capacity, 0);
+  const totals = {
+    present, capacity,
+    teachers: ELC_ROOMS.reduce((s, r) => s + r.teachers, 0),
+    entered: rooms.filter((r) => r.present !== null).length,
+    roomCount: ELC_ROOMS.length,
+  };
+  res.json({ ok: true, data: { date, rooms, totals, lastUpdated, dbError } });
 });
 
 // PUT /api/elc/counts { room, present, date? } — set (or clear) one room's count.
