@@ -563,9 +563,12 @@ function TeamPanel() {
   const [form, setForm] = useState({ email: "", role: "staff" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  const [loadErr, setLoadErr] = useState(null);
 
   const load = useCallback(() => {
-    apiFetch("/api/admin/users").then((r) => r.json()).then((j) => { if (j.ok) setData(j.data); }).catch(() => {});
+    apiFetch("/api/admin/users").then((r) => r.json())
+      .then((j) => { if (j.ok) { setData(j.data); setLoadErr(null); } else setLoadErr(j.message || "Couldn't load the team."); })
+      .catch((e) => setLoadErr(e.message || "Couldn't load the team."));
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -606,6 +609,13 @@ function TeamPanel() {
 
   return (
     <Panel title="Team" accent={C.navy} right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>admin</span>}>
+      {(loadErr || (data?.warnings?.length > 0)) && (
+        <div style={{ margin: "0 0 12px", padding: "10px 12px", background: C.redBg, border: `1px solid ${C.red}`, borderRadius: 8, fontSize: 12.5, color: C.red, fontFamily: mono, lineHeight: 1.5 }}>
+          {loadErr ? `Couldn't load the team: ${loadErr}` : "Some team data couldn't be read:"}
+          {data?.warnings?.length > 0 && <div style={{ marginTop: 4 }}>{data.warnings.join(" · ")}</div>}
+          <div style={{ marginTop: 6, color: C.mid }}>If this mentions a missing table (invites / app_settings), run the team-tables SQL in your Supabase SQL Editor.</div>
+        </div>
+      )}
       {/* Add a person — everyone signs in with Microsoft, so this authorizes an email. */}
       <div style={{ padding: "4px 0 14px", borderBottom: `1px solid ${C.border}` }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>Add a person</div>

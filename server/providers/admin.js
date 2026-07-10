@@ -65,17 +65,23 @@ adminRouter.get("/auth-check", async (_req, res) => {
 // role-based tab buckets. Everyone signs in with Microsoft, so there's no
 // account creation here — only authorization.
 adminRouter.get("/users", async (_req, res) => {
+  // Each read is isolated so one missing table (e.g. invites/app_settings not yet
+  // created) can't take down the whole panel — it surfaces in `warnings` instead.
+  const warnings = [];
+  const safe = async (label, q) => {
+    try { const { data, error } = await q; if (error) throw error; return data || []; }
+    catch (e) { warnings.push(`${label}: ${e.message}`); return []; }
+  };
   try {
     const { data: list, error } = await supabaseAdmin.auth.admin.listUsers({ perPage: 200 });
     if (error) throw error;
     const users = list.users;
     const ids = users.map((u) => u.id);
-    const [{ data: locs }, { data: prefs }, { data: invites }, roleTabs] = await Promise.all([
-      supabaseAdmin.from("user_locations").select("user_id, role").in("user_id", ids),
-      supabaseAdmin.from("user_prefs").select("user_id, prefs").in("user_id", ids),
-      supabaseAdmin.from("invites").select("email, role, created_at").order("created_at", { ascending: false }),
-      getRoleTabs(),
-    ]);
+    const locs = ids.length ? await safe("user_locations", supabaseAdmin.from("user_locations").select("user_id, role").in("user_id", ids)) : [];
+    const prefs = ids.length ? await safe("user_prefs", supabaseAdmin.from("user_prefs").select("user_id, prefs").in("user_id", ids)) : [];
+    const invites = await safe("invites", supabaseAdmin.from("invites").select("email, role, created_at").order("created_at", { ascending: false }));
+    let roleTabs = {};
+    try { roleTabs = await getRoleTabs(); } catch (e) { warnings.push(`app_settings: ${e.message}`); }
     const roleBy = new Map();
     (locs || []).forEach((r) => { const cur = roleBy.get(r.user_id); if (cur !== "admin") roleBy.set(r.user_id, r.role); });
     const prefBy = new Map((prefs || []).map((p) => [p.user_id, p.prefs || {}]));
@@ -84,7 +90,7 @@ adminRouter.get("/users", async (_req, res) => {
     const activeUsers = users
       .filter((u) => roleBy.has(u.id))
       .map((u) => ({ id: u.id, email: u.email, role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
-    res.json({ ok: true, data: { users: activeUsers, invites: invites || [], roleTabs } });
+    res.json({ ok: true, data: { users: activeUsers, invites: invites || [], roleTabs, warnings } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 
