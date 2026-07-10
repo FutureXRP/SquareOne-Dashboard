@@ -106,8 +106,11 @@ export async function checkNewMembers(req) {
     const more = fresh.length > 8 ? fresh.length - 8 : 0;
     await appendRecent({ at: new Date().toISOString(), count: fresh.length, members: names, more });
 
+    // Email/SMS blasts on new members are opt-in (NOTIFY_NEW_MEMBERS). By default
+    // we skip them — the in-app feed above already drives the Members-page congrats
+    // popup and the Alerts tab, which is what the team watches.
     let sent = false, errors = [];
-    if (config.alerts.configured) {
+    if (config.alerts.notifyNewMembers && config.alerts.configured) {
       const plural = fresh.length === 1 ? "New member" : `${fresh.length} new members`;
       ({ sent, errors } = await sendAlert(`SquareOne: ${plural}`, `${names.join(", ")}${more ? ` +${more} more` : ""}`));
     }

@@ -12,6 +12,7 @@ import { alertsRouter } from "./providers/memberAlerts.js";
 import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingClouds.js";
 import { meRouter } from "./providers/userCreds.js";
 import { adminRouter } from "./providers/admin.js";
+import { chatRouter } from "./providers/chat.js";
 import { requireAdmin } from "./auth.js";
 
 /*
@@ -60,5 +61,7 @@ app.use("/api/geovision", requireAuth, geovisionRouter);
 app.use("/api/me", requireAuth, meRouter);
 // Admin team management (create users, roles, per-user tab visibility, activity).
 app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
+// Internal team chat — whole-group + 1:1 between any two people with access.
+app.use("/api/chat", requireAuth, chatRouter);
 
 export default app;

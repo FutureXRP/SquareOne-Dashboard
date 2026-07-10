@@ -5,7 +5,7 @@ import {
   Sun, Moon, Plane, AlertTriangle, CircleCheck, Activity, Droplets,
   Calendar, Users, Video, Baby, Wifi, WifiOff, RefreshCw, UserCheck,
   DoorOpen, Building2, TrendingUp, LogOut, DollarSign, Settings, KeyRound, Loader2, Check, Trash2,
-  LayoutGrid, Eye, EyeOff, ArrowLeft, ArrowRight, Pencil,
+  LayoutGrid, Eye, EyeOff, ArrowLeft, ArrowRight, Pencil, MessageSquare,
 } from "lucide-react";
 import { usePrefs } from "./usePrefs.js";
 
@@ -75,6 +75,7 @@ const TABS = [
   ["routines", "Routines", ListChecks],
   ["automation", "Automation", Clock],
   ["alerts", "Alerts", Bell],
+  ["chat", "Chat", MessageSquare],
   ["assistant", "Assistant", Terminal],
   ["settings", "Settings", Settings],
 ];
@@ -163,6 +164,19 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 60_000);
     return () => { stop = true; clearInterval(id); };
   }, []);
+
+  // Sidebar unread dot for Chat: slow poll of the chat summary vs the local
+  // read marks (kept in localStorage, updated by the Chat tab as you read).
+  const [chatUnread, setChatUnread] = useState(false);
+  useEffect(() => {
+    if (!authEnabled || !user?.id) return;
+    let stop = false;
+    const poll = () => apiFetch("/api/chat/summary").then((r) => r.json())
+      .then((r) => { if (!stop && r.ok) setChatUnread(chatHasUnread(r.data, user.id)); }).catch(() => {});
+    poll();
+    const id = setInterval(() => { if (document.visibilityState === "visible") poll(); }, 20_000);
+    return () => { stop = true; clearInterval(id); };
+  }, [authEnabled, user]);
 
   /* ---- New-member sign-up feed ----
      Polls the rate-limited /api/alerts/check every 90s while the tab is
@@ -314,7 +328,7 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
           <nav className="so-nav">
             {visibleTabs.map(([id, label, Icon]) => {
               const active = tab === id;
-              const alert = id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup);
+              const alert = (id === "alerts" && (zones.some((z) => Math.abs(z.now - z.set) > 2) || freshSignup)) || (id === "chat" && chatUnread);
               return (
                 <button key={id} onClick={() => setTab(id)} className="so-navitem"
                   style={active ? { background: "rgba(255,255,255,.15)", color: "#fff", fontWeight: 600 } : undefined}>
@@ -357,6 +371,7 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
             {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
             {tab === "automation" && <Automation />}
             {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
+            {tab === "chat" && <Chat user={user} authEnabled={authEnabled} />}
             {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
             {tab === "settings" && <SettingsPage user={user} authEnabled={authEnabled} role={role}
               tabPrefs={tabPrefs} onTabPrefs={(tabs) => setPrefs({ tabs })} />}
@@ -1025,6 +1040,186 @@ function Home({ log, setTab, members, bookings, cameras, gvDoors, napcoAlarm }) 
       <AlarmCard alarm={napcoAlarm} onManage={() => setTab("security")} />
       <NotConnectedCard title="Climate" system="Pro1 thermostats" icon={Thermometer}
         blurb="Zone temperatures and setpoints appear here once the Pro1 thermostats are connected." />
+    </div>
+  );
+}
+
+/* ------------------------------- Team Chat --------------------------------
+   Whole-group + 1:1 messaging between everyone with dashboard access. Messages
+   persist in Supabase (server/providers/chat.js); the client polls for new ones.
+   "Read" marks live in localStorage so unread dots work without a server table. */
+const CHAT_READ_KEY = "so-chat-read";
+const chatReadMap = () => { try { return JSON.parse(localStorage.getItem(CHAT_READ_KEY) || "{}"); } catch { return {}; } };
+const chatMarkRead = (channel, at) => {
+  const m = chatReadMap(); m[channel] = at || new Date().toISOString();
+  try { localStorage.setItem(CHAT_READ_KEY, JSON.stringify(m)); } catch { /* private mode */ }
+};
+const chatHasUnread = (summary, meId) => {
+  const read = chatReadMap();
+  return Object.entries(summary || {}).some(([ch, s]) => s && s.lastSender !== meId && (!read[ch] || s.lastAt > read[ch]));
+};
+const dmChan = (a, b) => "dm:" + [a, b].sort().join(":");
+const chatName = (p) => (p?.name && p.name !== p.email ? p.name : (p?.email || "").split("@")[0]) || "Someone";
+
+function Chat({ user, authEnabled }) {
+  const meId = user?.id || null;
+  const [contacts, setContacts] = useState([]);
+  const [summary, setSummary] = useState({});
+  const [active, setActive] = useState({ kind: "group" });
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const scrollRef = useRef(null);
+  const lastAtRef = useRef(null);
+
+  const channelKey = active.kind === "group" ? "group" : dmChan(meId, active.user.id);
+  const query = active.kind === "group" ? "channel=group" : `with=${active.user.id}`;
+
+  // Contacts once; summary on a slow poll (previews + unread dots).
+  useEffect(() => {
+    if (!authEnabled || !meId) return;
+    apiFetch("/api/chat/contacts").then((r) => r.json())
+      .then((r) => { if (r.ok) setContacts(r.data.contacts || []); }).catch(() => {});
+  }, [authEnabled, meId]);
+  useEffect(() => {
+    if (!authEnabled || !meId) return;
+    let stop = false;
+    const poll = () => apiFetch("/api/chat/summary").then((r) => r.json())
+      .then((r) => { if (!stop && r.ok) setSummary(r.data || {}); }).catch(() => {});
+    poll();
+    const id = setInterval(() => { if (document.visibilityState === "visible") poll(); }, 8000);
+    return () => { stop = true; clearInterval(id); };
+  }, [authEnabled, meId]);
+
+  // Load + poll the active channel's messages (append only the newer ones).
+  useEffect(() => {
+    if (!authEnabled || !meId) return;
+    let stop = false;
+    setLoading(true); setMessages([]); lastAtRef.current = null;
+    const load = async () => {
+      const after = lastAtRef.current;
+      const url = `/api/chat/messages?${query}${after ? `&after=${encodeURIComponent(after)}` : ""}`;
+      const r = await apiFetch(url).then((res) => res.json()).catch(() => null);
+      if (stop) return;
+      if (r && r.ok && r.data.length) {
+        lastAtRef.current = r.data[r.data.length - 1].created_at;
+        chatMarkRead(channelKey, lastAtRef.current);
+        setMessages((prev) => (after ? [...prev, ...r.data] : r.data));
+      } else if (r && r.ok && !after) setMessages([]);
+      setLoading(false);
+    };
+    load();
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 4000);
+    return () => { stop = true; clearInterval(id); };
+  }, [query, authEnabled, meId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the thread pinned to the newest message.
+  useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages]);
+
+  const send = async () => {
+    const body = text.trim();
+    if (!body || sending) return;
+    setSending(true);
+    const payload = active.kind === "group" ? { channel: "group", body } : { to: active.user.id, body };
+    try {
+      const r = await apiFetch("/api/chat/messages", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      }).then((res) => res.json());
+      if (r.ok) {
+        setMessages((prev) => [...prev, r.data]);
+        lastAtRef.current = r.data.created_at;
+        chatMarkRead(channelKey, r.data.created_at);
+        setText("");
+      }
+    } finally { setSending(false); }
+  };
+
+  if (!authEnabled || !meId)
+    return <Panel title="Team Chat"><Empty text="Chat is available once you're signed in." /></Panel>;
+
+  const nameById = new Map(contacts.map((c) => [c.id, c]));
+  const read = chatReadMap();
+  const unreadFor = (key) => { const s = summary[key]; return s && s.lastSender !== meId && (!read[key] || s.lastAt > read[key]); };
+  const group = { key: "group", label: "Group Chat", sub: "Everyone", isGroup: true };
+  const dms = contacts
+    .map((c) => ({ key: dmChan(meId, c.id), label: chatName(c), sub: c.email, user: c }))
+    .sort((a, b) => (summary[b.key]?.lastAt || "").localeCompare(summary[a.key]?.lastAt || ""));
+  const convos = [group, ...dms];
+
+  return (
+    <div style={{ display: "flex", height: "72vh", minHeight: 420, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", background: C.panel }}>
+      {/* Conversation list */}
+      <div style={{ width: 250, flex: "0 0 auto", borderRight: `1px solid ${C.border}`, overflowY: "auto", background: C.panel2 }}>
+        <div style={{ padding: "12px 14px", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.dim, fontFamily: mono }}>Conversations</div>
+        {convos.map((c) => {
+          const on = c.key === channelKey;
+          const unread = unreadFor(c.key);
+          const preview = summary[c.key]?.lastBody;
+          return (
+            <button key={c.key} onClick={() => setActive(c.isGroup ? { kind: "group" } : { kind: "dm", user: c.user })}
+              style={{ display: "block", width: "100%", textAlign: "left", border: "none", cursor: "pointer",
+                padding: "10px 14px", background: on ? C.cyanBg : "transparent", borderLeft: on ? `3px solid ${C.cyan}` : "3px solid transparent" }}>
+              <div className="flex items-center justify-between" style={{ gap: 8 }}>
+                <span className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                  {c.isGroup
+                    ? <span style={{ width: 22, height: 22, borderRadius: 99, background: C.cyan, display: "grid", placeItems: "center", flex: "0 0 auto" }}><Users size={13} color="#fff" /></span>
+                    : <span style={{ width: 22, height: 22, borderRadius: 99, background: C.navy, color: "#fff", fontSize: 11, fontWeight: 700, display: "grid", placeItems: "center", flex: "0 0 auto" }}>{(c.label[0] || "?").toUpperCase()}</span>}
+                  <span style={{ fontSize: 13.5, fontWeight: on ? 700 : 600, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+                </span>
+                {unread && <span style={{ width: 8, height: 8, borderRadius: 99, background: C.amber, flex: "0 0 auto" }} />}
+              </div>
+              <div style={{ fontSize: 11.5, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2, paddingLeft: 30 }}>
+                {preview || c.sub}
+              </div>
+            </button>
+          );
+        })}
+        {contacts.length === 0 && <div style={{ padding: 14 }}><Empty text="No teammates yet." /></div>}
+      </div>
+
+      {/* Thread */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, fontWeight: 700, fontSize: 14 }}>
+          {active.kind === "group" ? "Group Chat" : chatName(active.user)}
+          {active.kind === "group"
+            ? <span style={{ fontSize: 12, color: C.dim, fontWeight: 400, marginLeft: 8 }}>everyone with access</span>
+            : <span style={{ fontSize: 12, color: C.dim, fontWeight: 400, marginLeft: 8 }}>{active.user.email}</span>}
+        </div>
+        <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+          {loading ? <div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13 }}><Loader2 size={14} className="spin" /> Loading…</div>
+            : messages.length === 0 ? <Empty text="No messages yet. Say hello 👋" />
+            : messages.map((m) => {
+                const mine = m.sender_id === meId;
+                const who = mine ? "You" : chatName(nameById.get(m.sender_id) || { email: m.sender_email });
+                return (
+                  <div key={m.id} style={{ alignSelf: mine ? "flex-end" : "flex-start", maxWidth: "76%" }}>
+                    {!mine && active.kind === "group" && <div style={{ fontSize: 10.5, color: C.dim, marginBottom: 2, marginLeft: 4 }}>{who}</div>}
+                    <div style={{ padding: "8px 12px", borderRadius: 12, fontSize: 14, lineHeight: 1.35, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                      background: mine ? C.cyan : C.panel2, color: mine ? "#fff" : C.text,
+                      borderTopRightRadius: mine ? 3 : 12, borderTopLeftRadius: mine ? 12 : 3 }}>
+                      {m.body}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.dim, marginTop: 2, textAlign: mine ? "right" : "left" }}>
+                      {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  </div>
+                );
+              })}
+        </div>
+        <div style={{ borderTop: `1px solid ${C.border}`, padding: 12, display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <textarea value={text} onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder={`Message ${active.kind === "group" ? "everyone" : chatName(active.user)}…`}
+            rows={1} style={{ flex: 1, resize: "none", maxHeight: 120, padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.border}`,
+              fontFamily: sans, fontSize: 14, color: C.text, background: C.panel2, outline: "none" }} />
+          <button onClick={send} disabled={sending || !text.trim()} className="so-btn"
+            style={{ padding: "10px 14px", borderRadius: 10, background: C.cyan, color: "#fff", borderColor: C.cyan,
+              display: "flex", alignItems: "center", gap: 6, opacity: sending || !text.trim() ? 0.6 : 1 }}>
+            {sending ? <Loader2 size={15} className="spin" /> : <Send size={15} />}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
