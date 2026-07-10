@@ -367,7 +367,7 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
             {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
             {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik}
               layout={prefs.cameras || {}} onLayout={(cameras) => setPrefs({ cameras })} />}
-            {tab === "elc" && <Elc elc={elc} live={!usingMock.procare} />}
+            {tab === "elc" && <Elc />}
             {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
             {tab === "automation" && <Automation />}
             {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
@@ -915,7 +915,7 @@ function ConnectionBar({ connected, onReload }) {
     ["Doors · GeoVision", connected.geovision],
     ["Alarm · Napco", connected.napco],
     ["Climate · Pro1", connected.pro1],
-    ["ELC · ProCare", connected.procare],
+    ["ELC · Manual", true],
   ];
   const anyPreview = items.some(([, on]) => !on);
   return (
@@ -1877,44 +1877,113 @@ function CameraTile({ c, snapshotUrl, liveEnabled, arranging, isHidden, onLive, 
 }
 
 /* ----------------------------- ELC (ProCare) ----------------------------- */
-function Elc({ elc, live }) {
-  const ratioOk = elc.staffPresent >= elc.requiredRatioStaff;
+// Early Learning Center — manual daily attendance. Staff type each room's
+// morning headcount into a box; entries auto-save and are shared across the team
+// (server/providers/elc.js). No ProCare API.
+function Elc() {
+  const [data, setData] = useState(null);      // { date, rooms, totals, lastUpdated }
+  const [vals, setVals] = useState({});        // roomId -> input string
+  const [status, setStatus] = useState({});    // roomId -> 'saving'|'saved'|'error'
+  const dirty = useRef(new Set());             // rooms with unsaved local edits
+  const timers = useRef({});                   // per-room debounce timers
+
+  // Merge server data in, but never clobber a box the user is mid-edit on.
+  const applyServer = (d) => {
+    setData(d);
+    setVals((prev) => {
+      const next = { ...prev };
+      d.rooms.forEach((r) => { if (!dirty.current.has(r.id)) next[r.id] = r.present === null ? "" : String(r.present); });
+      return next;
+    });
+  };
+  useEffect(() => {
+    let stop = false;
+    const load = () => apiFetch("/api/elc/today").then((r) => r.json())
+      .then((r) => { if (!stop && r.ok) applyServer(r.data); }).catch(() => {});
+    load();
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 30_000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
+  const save = async (roomId, raw) => {
+    setStatus((s) => ({ ...s, [roomId]: "saving" }));
+    const present = raw === "" ? null : Number(raw);
+    try {
+      const r = await apiFetch("/api/elc/counts", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room: roomId, present }),
+      }).then((res) => res.json());
+      if (r.ok) {
+        dirty.current.delete(roomId);
+        setStatus((s) => ({ ...s, [roomId]: "saved" }));
+        setTimeout(() => setStatus((s) => ({ ...s, [roomId]: undefined })), 1600);
+      } else setStatus((s) => ({ ...s, [roomId]: "error" }));
+    } catch { setStatus((s) => ({ ...s, [roomId]: "error" })); }
+  };
+  const onType = (roomId, raw) => {
+    const clean = raw.replace(/[^0-9]/g, "").slice(0, 3);
+    dirty.current.add(roomId);
+    setVals((v) => ({ ...v, [roomId]: clean }));
+    clearTimeout(timers.current[roomId]);
+    timers.current[roomId] = setTimeout(() => save(roomId, clean), 600);
+  };
+  const step = (roomId, delta) => {
+    const nv = String(Math.max(0, Number(vals[roomId] || 0) + delta));
+    dirty.current.add(roomId);
+    setVals((v) => ({ ...v, [roomId]: nv }));
+    clearTimeout(timers.current[roomId]);
+    save(roomId, nv);
+  };
+
+  if (!data)
+    return <Panel title="Early Learning Center"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Loading…</div></Panel>;
+
+  const t = data.totals;
+  const dateLabel = new Date(data.date + "T12:00:00").toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
   return (
     <div className="grid gap-3">
       <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
-        <Stat label="Children present" value={elc.childrenPresent} sub={`of ${elc.childrenEnrolled} enrolled`} icon={Baby} color={C.cyan} />
-        <Stat label="Staff present" value={elc.staffPresent} sub={`need ${elc.requiredRatioStaff}`} icon={UserCheck} color={ratioOk ? C.go : C.red} />
-        <Stat label="Ratio" value={ratioOk ? "OK" : "LOW"} icon={ShieldCheck} color={ratioOk ? C.go : C.red} />
-        <Stat label="Parent messages" value={elc.unreadMessages} sub="unread" icon={Bell} color={elc.unreadMessages ? C.amber : C.dim} />
+        <Stat label="Children present" value={t.present} sub={`of ${t.capacity} capacity`} icon={Baby} color={C.cyan} />
+        <Stat label="Rooms entered" value={`${t.entered}/${t.roomCount}`} sub="today" icon={CircleCheck} color={t.entered === t.roomCount ? C.go : C.amber} />
+        <Stat label="Teachers" value={t.teachers} sub="2 per room" icon={UserCheck} color={C.cyan} />
+        <Stat label="Open spots" value={Math.max(0, t.capacity - t.present)} sub="remaining" icon={Users} color={C.go} />
       </div>
-      <Panel title="Rooms" accent={ratioOk ? C.go : C.red}
-        right={<SourceTag live={live} name="ProCare" />}>
-        {elc.rooms.map((r) => {
-          const full = r.present >= r.capacity;
+      <Panel title={`Daily Attendance — ${dateLabel}`} accent={C.cyan}
+        right={<span style={{ fontSize: 11, fontFamily: mono, color: C.dim }}>{data.lastUpdated ? `updated ${new Date(data.lastUpdated).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "no entries yet"}</span>}>
+        {data.rooms.map((r) => {
+          const val = vals[r.id] ?? "";
+          const n = val === "" ? null : Number(val);
+          const full = n !== null && n >= r.capacity;
+          const over = n !== null && n > r.capacity;
+          const pct = n === null ? 0 : Math.min(100, (n / r.capacity) * 100);
+          const st = status[r.id];
           return (
-            <div key={r.room} className="flex items-center gap-3" style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14.5, fontWeight: 600 }}>{r.room}</div>
-                <div style={{ fontSize: 12, color: C.dim, fontFamily: mono }}>{r.staff} staff</div>
+            <div key={r.id} className="flex items-center gap-3" style={{ padding: "12px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</div>
+                <div style={{ fontSize: 12, color: C.dim, fontFamily: mono }}>{r.teachers} teachers · capacity {r.capacity}</div>
+                <div style={{ height: 6, background: C.panel2, borderRadius: 99, overflow: "hidden", marginTop: 6, maxWidth: 280 }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: over ? C.red : full ? C.amber : C.go, borderRadius: 99, transition: "width .2s" }} />
+                </div>
               </div>
-              <div style={{ width: 120 }}>
-                <div className="flex items-center justify-between" style={{ fontFamily: mono, fontSize: 12, color: full ? C.amber : C.mid, marginBottom: 5 }}>
-                  <span>{r.present}/{r.capacity}</span>{full && <span style={{ color: C.amber }}>FULL</span>}
-                </div>
-                <div style={{ height: 8, background: C.panel2, borderRadius: 99, overflow: "hidden" }}>
-                  <div style={{ width: `${(r.present / r.capacity) * 100}%`, height: "100%", background: full ? C.amber : C.go, borderRadius: 99 }} />
-                </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => step(r.id, -1)} className="so-btn" style={{ width: 34, height: 34, borderRadius: 8, display: "grid", placeItems: "center" }} aria-label={`fewer in ${r.name}`}><ChevronDown size={16} /></button>
+                <input value={val} onChange={(e) => onType(r.id, e.target.value)}
+                  onBlur={() => { clearTimeout(timers.current[r.id]); if (dirty.current.has(r.id)) save(r.id, val); }}
+                  inputMode="numeric" placeholder="—" aria-label={`children present in ${r.name}`}
+                  style={{ width: 66, textAlign: "center", fontSize: 20, fontWeight: 700, fontFamily: mono, padding: "6px 4px", borderRadius: 8, border: `1px solid ${over ? C.red : C.border}`, background: C.panel2, color: over ? C.red : C.text, outline: "none" }} />
+                <button onClick={() => step(r.id, 1)} className="so-btn" style={{ width: 34, height: 34, borderRadius: 8, display: "grid", placeItems: "center" }} aria-label={`more in ${r.name}`}><ChevronUp size={16} /></button>
+                <span style={{ width: 60, fontSize: 11, fontFamily: mono, color: st === "saved" ? C.go : st === "error" ? C.red : st === "saving" ? C.mid : over ? C.red : C.dim }}>
+                  {st === "saving" ? "saving…" : st === "saved" ? "saved ✓" : st === "error" ? "retry" : over ? "over!" : full ? "full" : `of ${r.capacity}`}
+                </span>
               </div>
             </div>
           );
         })}
       </Panel>
-      {!live && (
-        <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, padding: "0 2px" }}>
-          Note: ProCare does not publish a broadly-available public API. Confirm partner/API
-          access for your account before wiring this tab to live data.
-        </div>
-      )}
+      <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, padding: "0 2px" }}>
+        Staff-entered daily counts — everyone with access sees the same numbers. Entries save automatically; each morning starts fresh.
+      </div>
     </div>
   );
 }

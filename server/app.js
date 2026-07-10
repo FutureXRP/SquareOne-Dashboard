@@ -13,6 +13,7 @@ import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingCl
 import { meRouter } from "./providers/userCreds.js";
 import { adminRouter } from "./providers/admin.js";
 import { chatRouter } from "./providers/chat.js";
+import { elcRouter } from "./providers/elc.js";
 import { requireAdmin } from "./auth.js";
 
 /*
@@ -63,5 +64,7 @@ app.use("/api/me", requireAuth, meRouter);
 app.use("/api/admin", requireAuth, requireAdmin, adminRouter);
 // Internal team chat — whole-group + 1:1 between any two people with access.
 app.use("/api/chat", requireAuth, chatRouter);
+// Early Learning Center — manual daily attendance (no ProCare API).
+app.use("/api/elc", requireAuth, elcRouter);
 
 export default app;

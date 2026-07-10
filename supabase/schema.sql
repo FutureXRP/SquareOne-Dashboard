@@ -162,6 +162,22 @@ create table if not exists chat_messages (
 create index if not exists chat_messages_channel_idx on chat_messages (channel, created_at);
 
 -- ---------------------------------------------------------------------------
+-- Early Learning Center — manual daily attendance (no ProCare API). One row per
+-- classroom per day; staff enter how many children checked in each morning.
+-- Shared across the team, keyed by date so each day is preserved. Room roster
+-- (names + capacity) lives in code (server/providers/elc.js). SERVICE-ROLE ONLY.
+-- ---------------------------------------------------------------------------
+create table if not exists elc_counts (
+  date          date not null,
+  room          text not null,                 -- room id (see ELC_ROOMS)
+  present       integer not null,
+  updated_by    uuid references auth.users(id) on delete set null,
+  updated_email text,
+  updated_at    timestamptz not null default now(),
+  primary key (date, room)
+);
+
+-- ---------------------------------------------------------------------------
 -- Helper: current user's role at a location
 -- ---------------------------------------------------------------------------
 create or replace function role_at(loc uuid)
@@ -204,6 +220,7 @@ alter table user_prefs          enable row level security;  -- no policies = ser
 alter table invites             enable row level security;  -- no policies = service-role only
 alter table app_settings        enable row level security;  -- no policies = service-role only
 alter table chat_messages       enable row level security;  -- no policies = service-role only
+alter table elc_counts          enable row level security;  -- no policies = service-role only
 
 -- Profiles: a user sees/edits their own; admins see all.
 create policy profiles_self on profiles
