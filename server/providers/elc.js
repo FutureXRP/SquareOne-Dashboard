@@ -25,7 +25,7 @@ export const ELC_ROOMS = [
   { id: "river-otters",    name: "River Otters",     teachers: 2, capacity: 12, rates: { private: 1000.00, dhs: 1046.18, tribal: 1152.75 } },
   { id: "turtle-doves",    name: "Turtle Doves",     teachers: 2, capacity: 14, rates: { private: 965.00,  dhs: 898.28,  tribal: 1065.75 } },
   { id: "prairie-dogs",    name: "Prairie Dogs",     teachers: 2, capacity: 16, rates: { private: 915.00,  dhs: 898.28,  tribal: 1065.75 } },
-  { id: "wood-ducks",      name: "Wood Ducks",       teachers: 2, capacity: 22, rates: { private: 810.00,  dhs: 630.75,  tribal: 804.75 } },
+  { id: "wood-ducks",      name: "Wood Ducks",       teachers: 2, capacity: 20, rates: { private: 810.00,  dhs: 630.75,  tribal: 804.75 } },
 ];
 
 // Funding sources tracked per room, and the average working days per month used
