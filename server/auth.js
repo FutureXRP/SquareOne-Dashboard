@@ -48,6 +48,27 @@ export async function requireAdmin(req, res, next) {
   }
 }
 
+// Require an admin OR manager grant (facility-wide controls: campus lock/unlock,
+// emergency lockdown). Assumes requireAuth ran. Open mode allows through.
+export async function requireManager(req, res, next) {
+  if (!authEnabled) return next();
+  if (!req.user) return res.status(401).json({ ok: false, message: "Not signed in." });
+  if (ADMIN_EMAILS.has((req.user.email || "").toLowerCase())) return next();
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("user_locations")
+      .select("role")
+      .eq("user_id", req.user.id)
+      .in("role", ["admin", "manager"])
+      .limit(1);
+    if (error) throw error;
+    if (data && data.length) return next();
+    return res.status(403).json({ ok: false, message: "Manager or admin role required for facility controls." });
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: `Role check failed: ${e.message}` });
+  }
+}
+
 // Emails that are always admins, regardless of the invites/user_locations table.
 // A bootstrap so the owner can never be locked out of the invite-only system.
 // Set ADMIN_EMAILS="matt@squareonecompassion.com,justin@squareonecompassion.com".

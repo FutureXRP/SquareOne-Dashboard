@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { Router } from "express";
 import { config, guard } from "../config.js";
-import { requireAdmin, requireAuth, logAudit } from "../auth.js";
+import { requireAdmin, requireAuth, requireManager, logAudit } from "../auth.js";
 import { credsFor } from "./userCreds.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
 
@@ -1352,7 +1352,7 @@ geovisionRouter.post(
 // fires all doors together (shared server guid). Attributed to the signed-in user.
 geovisionRouter.post(
   "/doors-all/:op",
-  requireAuth,
+  requireManager, // facility-wide lock/unlock/lockdown — managers & admins only
   guard("geovision", async (req) => {
     const operation = GV_DOOR_OPS[req.params.op];
     if (!operation) throw new Error(`Unknown door operation: ${req.params.op}`);

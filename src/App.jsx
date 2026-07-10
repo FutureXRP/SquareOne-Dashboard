@@ -38,7 +38,7 @@ export default function App() {
   // Authenticated but not authorized (no invite) — deny with a clear message.
   if (auth.noAccess) return <NoAccess email={auth.user?.email} onSignOut={auth.signOut} />;
 
-  return <SquareOneOps user={auth.user} role={auth.role} roleTabs={auth.roleTabs} authEnabled={auth.enabled} onSignOut={auth.signOut} />;
+  return <SquareOneOps user={auth.user} role={auth.role} roleTabs={auth.roleTabs} entity={auth.entity} authEnabled={auth.enabled} onSignOut={auth.signOut} />;
 }
 
 function NoAccess({ email, onSignOut }) {

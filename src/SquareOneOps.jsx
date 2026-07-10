@@ -82,6 +82,21 @@ const TABS = [
   ["settings", "Settings", Settings],
 ];
 
+// Business entities a staffer can belong to. Admins/managers see everything;
+// a staffer sees every tab EXCEPT the ones their entity hides. (Future medical-
+// specific tabs get added to the elc/interactive hidden lists as they're built.)
+const ENTITIES = [
+  { id: "medical", name: "SquareOne Medical Center" },
+  { id: "interactive", name: "SquareOne Interactive" },
+  { id: "elc", name: "SquareOne ELC" },
+];
+const ENTITY_HIDDEN = {
+  medical: ["members", "elc"],
+  elc: ["members"],
+  interactive: ["elc"],
+};
+const entityName = (id) => (ENTITIES.find((e) => e.id === id) || {}).name || null;
+
 /* ------------------------- preview mock data (cloud) ------------------------- */
 // Amilia — rooms booked today + membership summary.
 const MOCK_BOOKINGS = [
@@ -123,7 +138,7 @@ const MOCK_ELC = {
   unreadMessages: 4,
 };
 
-export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, onSignOut } = {}) {
+export default function SquareOneOps({ user, role, roleTabs = {}, entity = null, authEnabled, onSignOut } = {}) {
   const [tab, setTab] = useState("home");
   const [prefs, setPrefs] = usePrefs(); // per-user UI prefs (camera wall layout, …)
 
@@ -265,17 +280,20 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
   // manager/staff, a tab is on unless: the role's bucket turns it off
   // (roleTabs[role]) — or the person's own override does (prefs.tabs, which wins).
   const tabPrefs = prefs.tabs || {};
-  const roleBucket = role && role !== "admin" ? (roleTabs[role] || {}) : {};
+  const roleBucket = role === "staff" ? (roleTabs.staff || {}) : {};
   const tabVisible = (id) => {
     if (id === "home" || id === "settings") return true;
-    if (role === "admin" || !authEnabled) return true;
-    if (tabPrefs[id] !== undefined) return tabPrefs[id] !== false; // per-person override wins
-    return roleBucket[id] !== false;                                // else the role bucket
+    // Admins and managers see everything, across every entity.
+    if (!authEnabled || role === "admin" || role === "manager") return true;
+    // Staff:
+    if (tabPrefs[id] !== undefined) return tabPrefs[id] !== false;   // per-person override wins
+    if (entity && (ENTITY_HIDDEN[entity] || []).includes(id)) return false; // entity scoping
+    return roleBucket[id] !== false;                                 // global staff bucket
   };
   const visibleTabs = TABS.filter(([id]) => tabVisible(id));
   useEffect(() => {
     if (!visibleTabs.some(([id]) => id === tab)) setTab("home");
-  }, [tabPrefs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tabPrefs, entity, role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: sans, minHeight: "100%" }}>
@@ -363,7 +381,7 @@ export default function SquareOneOps({ user, role, roleTabs = {}, authEnabled, o
           <div className="so-content">
             <ConnectionBar connected={{ amilia: connected.amilia, hik: connected.hik, geovision: gvConnected, napco: !!napcoAlarm?.loggedIn, pro1: false, procare: connected.procare }} onReload={() => { reload(); reloadHub(); }} />
             {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} napcoAlarm={napcoAlarm} /></>}
-            {tab === "security" && <Security doors={doors} alarm={alarm} napcoAlarm={napcoAlarm} hub={hub} lockdown={lockdown} />}
+            {tab === "security" && <Security doors={doors} alarm={alarm} napcoAlarm={napcoAlarm} hub={hub} lockdown={lockdown} role={role} authEnabled={authEnabled} />}
             {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
             {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
             {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
@@ -584,7 +602,7 @@ function NameEdit({ value, placeholder = "Add name", onSave }) {
 function TeamPanel() {
   const [data, setData] = useState(null);   // { users, invites, roleTabs }
   const [expanded, setExpanded] = useState(null);
-  const [form, setForm] = useState({ email: "", role: "staff", name: "" });
+  const [form, setForm] = useState({ email: "", role: "staff", name: "", entity: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
@@ -601,7 +619,7 @@ function TeamPanel() {
     try {
       const r = await apiFetch("/api/admin/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then((res) => res.json());
       if (!r.ok) throw new Error(r.message || "Could not add");
-      setForm({ email: "", role: "staff", name: "" });
+      setForm({ email: "", role: "staff", name: "", entity: "" });
       setMsg({ ok: true, text: r.data.status === "active" ? `${r.data.email} already had an account — role set to ${r.data.role}.` : `Invited ${r.data.email} as ${r.data.role}. They'll get access next time they sign in with Microsoft.` });
       load();
     } catch (e) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
@@ -624,6 +642,7 @@ function TeamPanel() {
   };
   const setRole = async (id, role) => { await apiFetch(`/api/admin/users/${id}/role`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }); load(); };
   const setUserName = async (id, name) => { await apiFetch(`/api/admin/users/${id}/name`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); load(); };
+  const setUserEntity = async (id, entity) => { await apiFetch(`/api/admin/users/${id}/entity`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entity }) }); load(); };
   const setUserTab = async (u, id, on) => {
     const tabs = { ...(u.tabs || {}), [id]: on };
     await apiFetch(`/api/admin/users/${u.id}/tabs`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tabs }) });
@@ -646,6 +665,14 @@ function TeamPanel() {
       <option value="staff">Staff</option><option value="manager">Manager</option><option value="admin">Admin</option>
     </select>
   );
+  const EntityPicker = (value, onChange) => (
+    <select value={value || ""} onChange={(e) => onChange(e.target.value)} title="Entity (scopes what staff see)" style={{ ...inputStyle, padding: "6px 8px", cursor: "pointer" }}>
+      <option value="">No entity</option>
+      <option value="medical">Medical</option>
+      <option value="interactive">Interactive</option>
+      <option value="elc">ELC</option>
+    </select>
+  );
 
   return (
     <Panel title="Team" accent={C.navy} right={<span style={{ fontSize: 11, fontFamily: mono, color: C.mid }}>admin</span>}>
@@ -662,10 +689,11 @@ function TeamPanel() {
         <div style={{ fontSize: 12, color: C.mid, marginBottom: 8, lineHeight: 1.5 }}>
           Enter their SquareOne Microsoft email and role. They get access automatically the next time they sign in — no password to set.
         </div>
-        <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1.5fr 0.9fr auto" }}>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1.4fr 0.8fr 0.9fr auto" }}>
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Preferred name" style={inputStyle} />
           <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="name@squareonecompassion.com" style={inputStyle} />
           {RolePicker(form.role, (role) => setForm({ ...form, role }))}
+          {EntityPicker(form.entity, (entity) => setForm({ ...form, entity }))}
           <button onClick={invite} disabled={busy || !form.email}
             style={{ padding: "0 16px", borderRadius: 7, border: "none", cursor: "pointer", background: C.cyan, color: "#fff", fontWeight: 700, fontSize: 13 }}>
             {busy ? <Loader2 size={14} className="spin" /> : "Add"}
@@ -689,6 +717,7 @@ function TeamPanel() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {EntityPicker(iv.entity, (entity) => updateInvite(iv.email, { entity }))}
                   {RolePicker(iv.role, (role) => updateInvite(iv.email, { role }))}
                   <button onClick={() => sendInvite(iv.email)} className="so-btn" title="Email sign-in invite" style={{ padding: "6px 9px", borderRadius: 7, color: C.cyan, borderColor: C.border }}><Mail size={13} /></button>
                   <button onClick={() => copyInvite(iv.email)} className="so-btn" title="Copy invite link" style={{ padding: "6px 9px", borderRadius: 7, color: C.mid, borderColor: C.border }}><Link2 size={13} /></button>
@@ -716,6 +745,7 @@ function TeamPanel() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {EntityPicker(u.entity, (entity) => setUserEntity(u.id, entity))}
               {RolePicker(u.role || "staff", (role) => setRole(u.id, role))}
               <button onClick={() => setExpanded(expanded === u.id ? null : u.id)} className="so-btn" style={{ padding: "6px 11px", borderRadius: 7, fontSize: 12, color: C.mid }}>Tabs</button>
               <button onClick={() => remove(u)} className="so-btn" title="Remove" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
@@ -740,28 +770,29 @@ function TeamPanel() {
         </div>
       ))}
 
-      {/* Role buckets */}
+      {/* Entity scoping reference + staff bucket */}
       <div style={{ paddingTop: 14 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>What each role can see</div>
-        <div style={{ fontSize: 12, color: C.mid, marginBottom: 10, lineHeight: 1.5 }}>
-          Turn tabs on or off for everyone with that role. (Admins always see everything. A per-person override above wins over these.)
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text, marginBottom: 4 }}>Who sees what</div>
+        <div style={{ fontSize: 12, color: C.mid, marginBottom: 10, lineHeight: 1.6 }}>
+          <strong>Admins &amp; managers</strong> see everything across all entities.
+          <strong> Staff</strong> see every tab except the ones their <strong>entity</strong> hides:
+          <span style={{ display: "block", marginTop: 4, fontFamily: mono, fontSize: 11.5, color: C.dim }}>
+            Medical → no Members, no ELC · Interactive → no ELC · ELC → no Members
+          </span>
+          Only managers &amp; admins can lock/unlock or trigger emergency lockdown. A per-person tab override (the “Tabs” button above) still wins over all of this.
         </div>
-        {["manager", "staff"].map((r) => (
-          <div key={r} style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{r}</div>
-            <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" }}>
-              {TOGGLEABLE_TABS.map(([id, label, Icon]) => {
-                const on = (roleTabs[r] || {})[id] !== false;
-                return (
-                  <label key={id} className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer", color: C.text }}>
-                    <input type="checkbox" checked={on} onChange={() => setRoleBucket(r, id, !on)} />
-                    <Icon size={13} color={C.mid} />{label}
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-        ))}
+        <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Extra staff limits (all staff, on top of entity)</div>
+        <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" }}>
+          {TOGGLEABLE_TABS.map(([id, label, Icon]) => {
+            const on = (roleTabs.staff || {})[id] !== false;
+            return (
+              <label key={id} className="flex items-center gap-2" style={{ fontSize: 12.5, cursor: "pointer", color: C.text }}>
+                <input type="checkbox" checked={on} onChange={() => setRoleBucket("staff", id, !on)} />
+                <Icon size={13} color={C.mid} />{label}
+              </label>
+            );
+          })}
+        </div>
       </div>
     </Panel>
   );
@@ -1352,11 +1383,14 @@ function NotConnectedCard({ title, system, icon: Icon, blurb }) {
 }
 
 /* ----------------------------- SECURITY ----------------------------- */
-function Security({ napcoAlarm }) {
+function Security({ napcoAlarm, role, authEnabled }) {
+  // Facility-wide lock/unlock/lockdown is managers & admins only (also enforced
+  // server-side). Staff still get the alarm status + individual door controls.
+  const canMaster = !authEnabled || role === "admin" || role === "manager";
   return (
     <div className="grid gap-3">
       <AlarmCard alarm={napcoAlarm} />
-      <MasterDoorControls />
+      {canMaster && <MasterDoorControls />}
       <GeoVisionDoors />
     </div>
   );
