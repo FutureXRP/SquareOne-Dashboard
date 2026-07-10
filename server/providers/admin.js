@@ -79,17 +79,22 @@ adminRouter.get("/users", async (_req, res) => {
     const ids = users.map((u) => u.id);
     const locs = ids.length ? await safe("user_locations", supabaseAdmin.from("user_locations").select("user_id, role").in("user_id", ids)) : [];
     const prefs = ids.length ? await safe("user_prefs", supabaseAdmin.from("user_prefs").select("user_id, prefs").in("user_id", ids)) : [];
-    const invites = await safe("invites", supabaseAdmin.from("invites").select("email, role, created_at").order("created_at", { ascending: false }));
+    const profs = ids.length ? await safe("profiles", supabaseAdmin.from("profiles").select("id, full_name").in("id", ids)) : [];
+    const invites = await safe("invites", supabaseAdmin.from("invites").select("email, role, name, created_at").order("created_at", { ascending: false }));
     let roleTabs = {};
     try { roleTabs = await getRoleTabs(); } catch (e) { warnings.push(`app_settings: ${e.message}`); }
     const roleBy = new Map();
     (locs || []).forEach((r) => { const cur = roleBy.get(r.user_id); if (cur !== "admin") roleBy.set(r.user_id, r.role); });
     const prefBy = new Map((prefs || []).map((p) => [p.user_id, p.prefs || {}]));
+    const nameBy = new Map((profs || []).map((p) => [p.id, p.full_name]));
+    // A profile's full_name defaults to the email on signup — treat that as "no
+    // preferred name set" so the UI shows a placeholder rather than the raw email.
+    const preferredName = (u) => { const n = nameBy.get(u.id); return n && n !== u.email ? n : null; };
     // Only surface users who actually have access (a role) — auth.users may hold
     // stragglers who signed in before invite-only or were never authorized.
     const activeUsers = users
       .filter((u) => roleBy.has(u.id))
-      .map((u) => ({ id: u.id, email: u.email, role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
+      .map((u) => ({ id: u.id, email: u.email, name: preferredName(u), role: roleBy.get(u.id), lastSignIn: u.last_sign_in_at, tabs: (prefBy.get(u.id) || {}).tabs || null }));
     res.json({ ok: true, data: { users: activeUsers, invites: invites || [], roleTabs, warnings } });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
@@ -99,6 +104,7 @@ adminRouter.get("/users", async (_req, res) => {
 adminRouter.post("/invites", async (req, res) => {
   const email = String((req.body && req.body.email) || "").trim().toLowerCase();
   const role = (req.body && req.body.role) || "staff";
+  const name = String((req.body && req.body.name) || "").trim() || null;
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ ok: false, message: "A valid email is required." });
   if (!["staff", "manager", "admin"].includes(role)) return res.status(400).json({ ok: false, message: "Invalid role." });
   try {
@@ -108,12 +114,40 @@ adminRouter.post("/invites", async (req, res) => {
     if (existing) {
       const loc = await firstLocationId();
       await supabaseAdmin.from("user_locations").upsert({ user_id: existing.id, location_id: loc, role }, { onConflict: "user_id,location_id" });
+      if (name) await supabaseAdmin.from("profiles").upsert({ id: existing.id, full_name: name }, { onConflict: "id" });
       logAudit(req, "admin.set-role", existing.id, { email, role });
       return res.json({ ok: true, data: { email, role, status: "active" } });
     }
-    await supabaseAdmin.from("invites").upsert({ email, role, invited_by: req.user.id }, { onConflict: "email" });
+    await supabaseAdmin.from("invites").upsert({ email, role, name, invited_by: req.user.id }, { onConflict: "email" });
     logAudit(req, "admin.invite", email, { role });
     res.json({ ok: true, data: { email, role, status: "invited" } });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// PUT /api/admin/invites/:email { role?, name? } — edit a pending invite.
+adminRouter.put("/invites/:email", async (req, res) => {
+  const email = String(req.params.email || "").toLowerCase();
+  const patch = {};
+  if (req.body?.role !== undefined) {
+    if (!["staff", "manager", "admin"].includes(req.body.role)) return res.status(400).json({ ok: false, message: "Invalid role." });
+    patch.role = req.body.role;
+  }
+  if (req.body?.name !== undefined) patch.name = String(req.body.name || "").trim() || null;
+  if (!Object.keys(patch).length) return res.status(400).json({ ok: false, message: "Nothing to update." });
+  try {
+    await supabaseAdmin.from("invites").update(patch).eq("email", email);
+    logAudit(req, "admin.invite-update", email, patch);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
+});
+
+// PUT /api/admin/users/:id/name { name } — set a person's preferred/display name.
+adminRouter.put("/users/:id/name", async (req, res) => {
+  const name = String(req.body?.name || "").trim() || null;
+  try {
+    await supabaseAdmin.from("profiles").upsert({ id: req.params.id, full_name: name }, { onConflict: "id" });
+    logAudit(req, "admin.set-name", req.params.id, { name });
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, message: e.message }); }
 });
 

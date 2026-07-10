@@ -557,10 +557,32 @@ function MyTabsPanel({ tabPrefs, onTabPrefs }) {
 // Team — admin: authorize Microsoft accounts (invite by email + role), manage
 // active users, and set which tabs each role sees. No passwords: everyone signs
 // in with Microsoft, so this is pure authorization.
+// Inline editable name: shows the name (or a placeholder) as click-to-edit;
+// saves on Enter/blur, cancels on Escape.
+function NameEdit({ value, placeholder = "Add name", onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [v, setV] = useState(value || "");
+  useEffect(() => { setV(value || ""); }, [value]);
+  if (!editing)
+    return (
+      <button onClick={() => setEditing(true)} title="Edit name"
+        style={{ background: "none", border: "none", cursor: "pointer", textAlign: "left", padding: 0, display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13.5, fontWeight: 600, fontFamily: sans, color: value ? C.text : C.dim }}>
+        {value || placeholder} <Pencil size={11} color={C.dim} />
+      </button>
+    );
+  const commit = () => { onSave((v || "").trim()); setEditing(false); };
+  return (
+    <input autoFocus value={v} onChange={(e) => setV(e.target.value)}
+      onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setV(value || ""); setEditing(false); } }}
+      onBlur={commit} placeholder={placeholder}
+      style={{ ...inputStyle, padding: "4px 8px", fontSize: 13, maxWidth: 190 }} />
+  );
+}
+
 function TeamPanel() {
   const [data, setData] = useState(null);   // { users, invites, roleTabs }
   const [expanded, setExpanded] = useState(null);
-  const [form, setForm] = useState({ email: "", role: "staff" });
+  const [form, setForm] = useState({ email: "", role: "staff", name: "" });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const [loadErr, setLoadErr] = useState(null);
@@ -577,13 +599,15 @@ function TeamPanel() {
     try {
       const r = await apiFetch("/api/admin/invites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }).then((res) => res.json());
       if (!r.ok) throw new Error(r.message || "Could not add");
-      setForm({ email: "", role: "staff" });
+      setForm({ email: "", role: "staff", name: "" });
       setMsg({ ok: true, text: r.data.status === "active" ? `${r.data.email} already had an account — role set to ${r.data.role}.` : `Invited ${r.data.email} as ${r.data.role}. They'll get access next time they sign in with Microsoft.` });
       load();
     } catch (e) { setMsg({ ok: false, text: e.message }); } finally { setBusy(false); }
   };
   const cancelInvite = async (email) => { await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}`, { method: "DELETE" }); load(); };
+  const updateInvite = async (email, patch) => { await apiFetch(`/api/admin/invites/${encodeURIComponent(email)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }); load(); };
   const setRole = async (id, role) => { await apiFetch(`/api/admin/users/${id}/role`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }) }); load(); };
+  const setUserName = async (id, name) => { await apiFetch(`/api/admin/users/${id}/name`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }); load(); };
   const setUserTab = async (u, id, on) => {
     const tabs = { ...(u.tabs || {}), [id]: on };
     await apiFetch(`/api/admin/users/${u.id}/tabs`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tabs }) });
@@ -622,7 +646,8 @@ function TeamPanel() {
         <div style={{ fontSize: 12, color: C.mid, marginBottom: 8, lineHeight: 1.5 }}>
           Enter their SquareOne Microsoft email and role. They get access automatically the next time they sign in — no password to set.
         </div>
-        <div className="grid gap-2" style={{ gridTemplateColumns: "1.6fr 1fr auto" }}>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1.5fr 0.9fr auto" }}>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Preferred name" style={inputStyle} />
           <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="name@squareonecompassion.com" style={inputStyle} />
           {RolePicker(form.role, (role) => setForm({ ...form, role }))}
           <button onClick={invite} disabled={busy || !form.email}
@@ -638,12 +663,18 @@ function TeamPanel() {
         <div style={{ padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Invited · waiting for first sign-in</div>
           {invites.map((iv) => (
-            <div key={iv.email} className="flex items-center justify-between" style={{ padding: "7px 0", fontSize: 13.5 }}>
-              <span className="flex items-center gap-2"><Loader2 size={12} color={C.amber} /> {iv.email}</span>
-              <span className="flex items-center gap-2">
-                <span style={{ fontSize: 11, fontFamily: mono, color: C.amber, textTransform: "uppercase" }}>{iv.role}</span>
-                <button onClick={() => cancelInvite(iv.email)} className="so-btn" title="Cancel invite" style={{ padding: "5px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={12} /></button>
-              </span>
+            <div key={iv.email} className="flex items-center justify-between gap-3" style={{ padding: "8px 0" }}>
+              <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                <Clock size={14} color={C.amber} title="Waiting for first sign-in" />
+                <div style={{ minWidth: 0 }}>
+                  <NameEdit value={iv.name} onSave={(name) => updateInvite(iv.email, { name })} />
+                  <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{iv.email}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {RolePicker(iv.role, (role) => updateInvite(iv.email, { role }))}
+                <button onClick={() => cancelInvite(iv.email)} className="so-btn" title="Cancel invite" style={{ padding: "6px 9px", borderRadius: 7, color: C.red, borderColor: C.border }}><Trash2 size={13} /></button>
+              </div>
             </div>
           ))}
         </div>
@@ -656,9 +687,9 @@ function TeamPanel() {
         <div key={u.id} style={{ padding: "11px 0", borderBottom: `1px solid ${C.border}` }}>
           <div className="flex items-center justify-between gap-3">
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
-              <div style={{ fontSize: 11, color: C.dim, fontFamily: mono }}>
-                {u.lastSignIn ? `last in ${new Date(u.lastSignIn).toLocaleDateString([], { month: "short", day: "numeric" })}` : "never signed in"}
+              <NameEdit value={u.name} onSave={(name) => setUserName(u.id, name)} />
+              <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {u.email} · {u.lastSignIn ? `last in ${new Date(u.lastSignIn).toLocaleDateString([], { month: "short", day: "numeric" })}` : "never signed in"}
               </div>
             </div>
             <div className="flex items-center gap-2">
