@@ -389,7 +389,7 @@ export default function SquareOneOps({ user, role, roleTabs = {}, entity = null,
               layout={prefs.cameras || {}} onLayout={(cameras) => setPrefs({ cameras })} />}
             {tab === "elc" && <Elc />}
             {tab === "routines" && <Routines opening={opening} setOpening={setOpening} closing={closing} setClosing={setClosing} />}
-            {tab === "automation" && <Automation />}
+            {tab === "automation" && <Automation role={role} authEnabled={authEnabled} />}
             {tab === "alerts" && <Alerts zones={zones} doors={doors} cameras={cameras} elc={elc} memberSignups={memberSignups} />}
             {tab === "chat" && <Chat user={user} authEnabled={authEnabled} />}
             {tab === "assistant" && <Assistant hub={hub} doors={doors} zones={zones} alarm={alarm} aiEnabled={connected.assistant} reloadHub={reloadHub} />}
@@ -2168,32 +2168,79 @@ function Checklist({ title, items, setItems, doneLabel, color }) {
 }
 
 /* ---------------------------- AUTOMATION ---------------------------- */
-function Automation() {
-  const flows = [
-    { time: "7:30 AM", name: "Open campus", on: true, steps: ["Unlock doors", "Disarm alarm", "HVAC → day mode", "Confirm “Campus ready”"], color: C.cyan },
-    { time: "9:15 PM", name: "Secure campus", on: true, steps: ["Lock doors", "Arm alarm", "HVAC → night mode", "Verify all doors", "Confirm “Campus secured”"], color: C.go },
-  ];
+// Booking → door automation. Map each bookable Amilia room to a GeoVision door;
+// the cron then holds that door open from lead-min before each reservation to
+// lag-min after. Editing is managers/admins only (also enforced server-side).
+function Automation({ role, authEnabled }) {
+  const canEdit = !authEnabled || role === "admin" || role === "manager";
+  const [data, setData] = useState(null);      // { rooms, doors, map, leadMin, lagMin, geovisionLive }
+  const [sched, setSched] = useState(null);     // today's windows
+  const [status, setStatus] = useState(null);   // 'saving'|'saved'|'error'
+
+  const load = useCallback(() => {
+    apiFetch("/api/doors/booking-map").then((r) => r.json()).then((j) => { if (j.ok) setData(j.data); }).catch(() => {});
+    apiFetch("/api/doors/schedule").then((r) => r.json()).then((j) => { if (j.ok) setSched(j.data); }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const setDoor = async (room, value) => {
+    const map = { ...(data.map || {}) };
+    if (value) map[room] = value; else delete map[room];
+    setData((d) => ({ ...d, map }));
+    setStatus("saving");
+    try {
+      const r = await apiFetch("/api/doors/booking-map", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ map }) }).then((res) => res.json());
+      setStatus(r.ok ? "saved" : "error");
+      if (r.ok) setTimeout(() => setStatus(null), 1500);
+    } catch { setStatus("error"); }
+  };
+
+  if (!data) return <Panel title="Booking Automation"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Loading…</div></Panel>;
+
+  const doorLabel = (d) => `${d.name} · ${d.controller}`;
+  const doorVal = (d) => `${d.ctrl}:${d.door}`;
+  const upcoming = (sched?.windows || []).filter((w) => w.doorKey && w.status !== "done").slice(0, 8);
+  const mappedCount = Object.keys(data.map || {}).length;
+
   return (
     <div className="grid gap-3">
-      <div style={{ fontSize: 13, color: C.mid, fontFamily: mono, padding: "0 2px" }}>
-        Scheduled flows run on the on-site hub so they fire even if no one opens this dashboard.
+      <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, padding: "0 2px" }}>
+        Map each bookable room to the door that lets people in. The schedule then <strong>holds that door open</strong> from
+        <strong> {data.leadMin} min before</strong> each reservation until <strong>{data.lagMin} min after</strong>, then returns it to
+        normal card access. Runs automatically every 5 minutes — unmapped rooms are left alone.
+        {!data.geovisionLive && <span style={{ color: C.amber }}> (GeoVision isn't connected, so actions are dry-run for now.)</span>}
       </div>
-      {flows.map((f) => (
-        <Panel key={f.name} accent={f.color} title={`${f.time} · ${f.name}`}
-          right={<span className="flex items-center gap-2" style={{ fontFamily: mono, fontSize: 12, color: f.on ? C.go : C.dim }}><Power size={13} />{f.on ? "ENABLED" : "OFF"}</span>}>
-          <div className="flex flex-col gap-0">
-            {f.steps.map((s, i) => (
-              <div key={i} className="flex items-center gap-3" style={{ fontSize: 14, color: C.mid }}>
-                <div className="flex flex-col items-center" style={{ width: 16 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 99, background: f.color }} />
-                  {i < f.steps.length - 1 && <span style={{ width: 2, height: 20, background: C.border }} />}
-                </div>
-                <span style={{ paddingBottom: i < f.steps.length - 1 ? 12 : 0 }}>{s}</span>
+
+      <Panel title="Room → Door mapping" accent={C.cyan}
+        right={<span style={{ fontSize: 11, fontFamily: mono, color: status === "saved" ? C.go : status === "error" ? C.red : C.dim }}>
+          {status === "saving" ? "saving…" : status === "saved" ? "saved ✓" : status === "error" ? "save failed" : `${mappedCount} mapped`}</span>}>
+        {!canEdit && <div style={{ fontSize: 12, color: C.amber, fontFamily: mono, marginBottom: 8 }}>View only — managers &amp; admins can change the mapping.</div>}
+        {data.rooms.length === 0
+          ? <Empty text="No bookable rooms found in Amilia yet (checks the next 30 days)." />
+          : data.rooms.map((room) => (
+              <div key={room} className="flex items-center justify-between gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
+                <span className="flex items-center gap-2" style={{ fontSize: 14 }}><DoorOpen size={14} color={C.cyan} />{room}</span>
+                <select value={(data.map || {})[room] || ""} disabled={!canEdit} onChange={(e) => setDoor(room, e.target.value)}
+                  style={{ ...inputStyle, padding: "6px 8px", cursor: canEdit ? "pointer" : "default", minWidth: 200, maxWidth: 260 }}>
+                  <option value="">— no door (skip) —</option>
+                  {data.doors.map((d) => <option key={doorVal(d)} value={doorVal(d)}>{doorLabel(d)}</option>)}
+                </select>
               </div>
             ))}
-          </div>
-        </Panel>
-      ))}
+      </Panel>
+
+      <Panel title="Upcoming today" accent={C.dim}>
+        {upcoming.length === 0
+          ? <Empty text="No upcoming mapped reservations today." />
+          : upcoming.map((w) => (
+              <div key={w.id} className="flex items-center justify-between" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13 }}>
+                <span style={{ minWidth: 0 }}>{w.room} <span style={{ color: C.dim }}>→ {w.doorName}</span></span>
+                <span style={{ fontFamily: mono, fontSize: 12, color: w.status === "open" ? C.go : C.mid }}>
+                  {new Date(w.unlockAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–{new Date(w.relockAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} {w.status === "open" ? "· open now" : ""}
+                </span>
+              </div>
+            ))}
+      </Panel>
     </div>
   );
 }
