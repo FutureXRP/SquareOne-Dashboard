@@ -114,7 +114,7 @@ async function gvRegister(force = false) {
 // Unlock / lock a door by controller id + door id, using the server-issued
 // monitor guid. dvg_id=0 matches the captured working request. Retries once with
 // a fresh registration if the guid was rejected.
-async function gvDoorOp(ctrlId, drId, operation, retry = true) {
+export async function gvDoorOp(ctrlId, drId, operation, retry = true) {
   const guid = await gvRegister();
   const send = (g) => gvCommand({ action: "DOOR_OPERATION", module: "monitor", dvg_id: 0, ctrl_id: ctrlId, dr_id: drId, operation, client_guid: g || GV_CLIENT_GUID });
   let r = await send(guid);
@@ -127,7 +127,7 @@ async function gvDoorOp(ctrlId, drId, operation, retry = true) {
 
 // Live controller/door tree via CONTROLLER_LIST (rows carry ids AND names), so
 // the Security tab always reflects the real doors without any env config.
-async function gvDoorTree() {
+export async function gvDoorTree() {
   const r = await gvCommand({ action: "CONTROLLER_LIST", type: "all", pos: -1, start: 0, limit: 1000 });
   let t = null; try { t = JSON.parse(r.text); } catch { /* not json */ }
   if (!Array.isArray(t?.data)) return null;
@@ -1321,7 +1321,7 @@ geovisionRouter.get(
 
 // The GV-Access door menu, mapped to the exact operation constants the
 // controller expects (confirmed from the app's LiveLog.js context menu).
-const GV_DOOR_OPS = {
+export const GV_DOOR_OPS = {
   unlock: "UNLOCK_DOOR",              // momentary buzz-open (access-granted pulse)
   "force-unlock": "FORCE_UNLOCK",     // hold unlocked until released
   "force-lock": "FORCE_LOCK",         // hold locked — no card access
