@@ -2501,6 +2501,18 @@ function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
     return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
   }, [path]);
 
+  // On a real failure, ask the server WHY (real EZVIZ code), so encrypted-camera
+  // tiles show "needs code" vs "EZVIZ stream limit" instead of one vague label.
+  const [reason, setReason] = useState(null);
+  useEffect(() => {
+    if (!failed || !online || !camId) return;
+    let cancelled = false;
+    apiFetch(`/api/hik/cameras/${camId}/check`).then((r) => r.json())
+      .then((j) => { if (!cancelled && j.ok && j.data) setReason(j.data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [failed, online, camId]);
+
   // Poster-from-live fallback: snapshot failed but the camera is live-capable.
   const tryPoster = (online && liveEnabled && camId) && (failed || !path);
   useEffect(() => {
@@ -2518,15 +2530,23 @@ function Snapshot({ path, name, online, encrypted, camId, liveEnabled }) {
   // regardless of the (light) app theme.
   // Encrypted cameras can't be shown until their verification code is provided,
   // so label them clearly instead of a generic "unavailable".
-  const encLocked = online && failed && encrypted;
+  // Map the real EZVIZ code to a short label. 60019 = needs/wrong code;
+  // 6106/10026 = account/stream limit (too many at once), NOT a code problem.
+  const code = reason?.code;
+  const limited = code === "6106" || code === "10026";
+  const needsCode = code === "60019" || (online && failed && encrypted && !reason);
+  const encLocked = needsCode && !limited;
+  const label = !online ? "camera offline"
+    : limited ? `EZVIZ limit (${code}) — too many at once`
+    : encLocked ? (reason && !reason.hasCode ? "encrypted — needs code" : "encrypted — code rejected")
+    : tryPoster && !poster && !posterFailed ? "loading…"
+    : failed || posterFailed ? "snapshot unavailable"
+    : path ? "loading…" : "feed via Hik-Connect";
+  const amber = encLocked || limited;
   return (
-    <div className="flex flex-col items-center gap-1" style={{ color: encLocked ? "#E8A33E" : "#7C8A9C", fontFamily: mono, fontSize: 12, textAlign: "center", padding: 8 }}>
-      {encLocked ? <Lock size={20} color="#E8A33E" /> : <Video size={22} color={online ? "#7C8A9C" : C.red} />}
-      {!online ? "camera offline"
-        : encLocked ? "encrypted — needs code"
-        : tryPoster && !poster && !posterFailed ? "loading…"
-        : failed || posterFailed ? "snapshot unavailable"
-        : path ? "loading…" : "feed via Hik-Connect"}
+    <div className="flex flex-col items-center gap-1" style={{ color: amber ? "#E8A33E" : "#7C8A9C", fontFamily: mono, fontSize: 12, textAlign: "center", padding: 8 }}>
+      {amber ? <Lock size={20} color="#E8A33E" /> : <Video size={22} color={online ? "#7C8A9C" : C.red} />}
+      {label}
     </div>
   );
 }
