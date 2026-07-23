@@ -216,6 +216,30 @@ hikRouter.get(
   })
 );
 
+// Per-camera reason check: attempts the live-address call and reports the REAL
+// EZVIZ result, so a tile can show why it failed (wrong/missing code 60019 vs
+// account/stream limit 6106/10026) instead of a generic "needs code".
+hikRouter.get(
+  "/cameras/:id/check",
+  guard("hik", async (req) => {
+    const { accessToken, areaDomain } = await getToken();
+    const { deviceSerial, channelNo } = parseCamId(req.params.id);
+    const hasCode = Boolean(codeFor(deviceSerial));
+    try {
+      const data = await ezvizPost(
+        "/api/lapp/live/address/get",
+        { accessToken, deviceSerial, channelNo, protocol: 2, quality: 1, code: codeFor(deviceSerial) },
+        areaDomain
+      );
+      return { ok: Boolean(data?.url), serial: deviceSerial, hasCode, code: null };
+    } catch (e) {
+      const m = String(e.message).match(/code (\d+)/);
+      const code = m ? m[1] : (/Video Encryption/i.test(e.message) ? "60019" : null);
+      return { ok: false, serial: deviceSerial, hasCode, code, message: e.message.slice(0, 160) };
+    }
+  })
+);
+
 /*
   ---- Same-origin HLS proxy ----
   EZVIZ's HLS video servers don't send CORS headers, so the browser blocks
