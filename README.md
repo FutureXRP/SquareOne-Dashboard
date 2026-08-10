@@ -90,8 +90,12 @@ proxy. The matching tab flips from "sample" to "live" on the next refresh.
   store app; its server verifies the active membership, then calls
   `POST /api/member-door/unlock` here with a shared secret — no dashboard login.
 - Set the same `DOOR_SERVICE_TOKEN` (any long random string) in **both** apps.
-  Optional: `MEMBER_DOOR_ID` (default `fit`) and `MEMBER_DOOR_RELOCK_SECONDS`
-  (default `7` — the door relocks after this window, so one press = one entry).
+- Uses the same **GeoVision GV-Cloud** path as the Security tab: the fitness
+  door is found by name in the controller's live door tree (first door whose
+  name contains `MEMBER_DOOR_NAME`, default `fit`), and `UNLOCK_DOOR` is a
+  momentary buzz-open — the controller relocks itself, so one press = one
+  entry. Falls back to Home Assistant (`MEMBER_DOOR_ID`,
+  `MEMBER_DOOR_RELOCK_SECONDS`) if GV isn't configured.
 - Every press writes an `audit_log` row (`door.member_unlock`) with the member's
   name. See `server/providers/memberDoor.js`.
 
