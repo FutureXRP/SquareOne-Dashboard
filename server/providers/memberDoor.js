@@ -14,7 +14,7 @@ import { haOps } from "../haService.js";
   apps:
 
     DOOR_SERVICE_TOKEN=<long random string>   (both apps)
-    MEMBER_DOOR_NAME=fitness                  (optional; name match, default "fit")
+    MEMBER_DOOR_NAME=workoutrm                (optional; name match, default "workoutrm")
     MEMBER_DOOR_RELOCK_SECONDS=7              (only used on the Home Assistant path)
 
   Door control paths, same order the Security tab works today:
@@ -33,7 +33,8 @@ import { haOps } from "../haService.js";
 export const memberDoorRouter = Router();
 
 const RELOCK_SECONDS = Math.max(3, Number(process.env.MEMBER_DOOR_RELOCK_SECONDS || 7));
-const DOOR_NAME = (process.env.MEMBER_DOOR_NAME || "fit").toLowerCase();
+// The fitness center door is named "WorkOutRM" in GV-Access.
+const DOOR_NAME = (process.env.MEMBER_DOOR_NAME || "workoutrm").toLowerCase();
 
 const gvConfigured = () =>
   Boolean(config.geovision?.baseUrl && config.geovision?.username && config.geovision?.password);
