@@ -8,6 +8,7 @@ import { procareRouter } from "./providers/procare.js";
 import { hubRouter } from "./providers/homeassistant.js";
 import { assistantRouter } from "./providers/assistant.js";
 import { doorsRouter } from "./providers/doorSchedule.js";
+import { memberDoorRouter } from "./providers/memberDoor.js";
 import { alertsRouter } from "./providers/memberAlerts.js";
 import { pro1Router, napcoRouter, geovisionRouter } from "./providers/buildingClouds.js";
 import { meRouter } from "./providers/userCreds.js";
@@ -52,6 +53,9 @@ app.use("/api/assistant", requireAuth, assistantRouter);
 // Door schedule handles its own auth per-route: /schedule wants a signed-in
 // user, /run wants the cron secret (a scheduler can't sign in).
 app.use("/api/doors", doorsRouter);
+// Member unlocks from the Interactive store app — authenticated by the shared
+// DOOR_SERVICE_TOKEN header, not a dashboard login (see memberDoor.js).
+app.use("/api/member-door", memberDoorRouter);
 app.use("/api/alerts", alertsRouter);
 // Building-system clouds — start as admin-only login probes (see buildingClouds.js).
 app.use("/api/pro1", requireAuth, pro1Router);

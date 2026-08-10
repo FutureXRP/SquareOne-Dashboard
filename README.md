@@ -85,6 +85,16 @@ proxy. The matching tab flips from "sample" to "live" on the next refresh.
   `alarm_disarm`, `climate.set_temperature`. See `server/providers/homeassistant.js`.
 - The Security/Climate tabs then control real devices and reflect real state.
 
+### Member door unlock (SquareOne Interactive store app) — ready
+- Fitness members press **Unlock door** on their account page in the Interactive
+  store app; its server verifies the active membership, then calls
+  `POST /api/member-door/unlock` here with a shared secret — no dashboard login.
+- Set the same `DOOR_SERVICE_TOKEN` (any long random string) in **both** apps.
+  Optional: `MEMBER_DOOR_ID` (default `fit`) and `MEMBER_DOOR_RELOCK_SECONDS`
+  (default `7` — the door relocks after this window, so one press = one entry).
+- Every press writes an `audit_log` row (`door.member_unlock`) with the member's
+  name. See `server/providers/memberDoor.js`.
+
 ### Built-in AI assistant — ready
 - Set `ANTHROPIC_API_KEY` (from console.anthropic.com). The **Assistant** tab then
   understands plain English and takes real actions.
