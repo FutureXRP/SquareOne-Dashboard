@@ -1,30 +1,35 @@
 import { Router } from "express";
 import { config, guard } from "../config.js";
 import { requireAuth, requireManager, logAudit, supabaseAdmin } from "../auth.js";
-import { fetchReservations } from "./amilia.js";
+import { fetchBookingSpans, fetchFacilities } from "./interactive.js";
 import { haConfigured, haOps } from "../haService.js";
 import { checkNewMembers } from "./memberAlerts.js";
 import { gvDoorOp, gvDoorTree, GV_DOOR_OPS } from "./buildingClouds.js";
+import { memberDoorSetting } from "./memberDoor.js";
 
 export const doorsRouter = Router();
 
 /*
-  Booking-driven door schedule (real GeoVision doors).
+  Booking-driven door schedule — SquareOne Interactive bookings → real GeoVision doors.
 
-  Each Amilia reservation opens a window on its room's mapped door:
-      unlockAt = start − DOOR_UNLOCK_LEAD_MIN (default 20)
-      relockAt = end   + DOOR_RELOCK_LAG_MIN  (default 30)
+  Each confirmed, staff-approved booking opens a window on its room's mapped door.
+  Interactive already carries per-booking setup/cleanup buffers (minutes outside
+  the billed hours), and we add a lead/lag on top; the door honours whichever is
+  earlier/later:
+      unlockAt = min(start − DOOR_UNLOCK_LEAD_MIN, start − setup_min)
+      relockAt = max(end   + DOOR_RELOCK_LAG_MIN,  end   + cleanup_min)
   At unlockAt the door is FORCE_UNLOCKed (held open); at relockAt it's released
   back to its normal schedule. Overlapping bookings hold it open until the last
-  one clears; the reconciler only acts on window EDGES, so staff can still lock
+  one clears; the reconciler acts only on window EDGES, so staff can still lock
   or unlock a door mid-day without the cron fighting them.
 
-  Room → door mapping is admin-managed (app_settings 'door_booking_map', values
-  "ctrl:door") — see GET/PUT /api/doors/booking-map. Unmapped rooms do nothing.
+  Room → door mapping is admin-managed (app_settings 'door_booking_map', keyed
+  by Interactive facility id like "gym" → "ctrl:door"). Unmapped rooms do nothing.
+  The member "Unlock door" button uses a separate door: app_settings 'member_door'.
 
   GET  /api/doors/schedule      (signed-in) — today's computed windows.
-  GET  /api/doors/booking-map   (signed-in) — rooms + doors + current mapping.
-  PUT  /api/doors/booking-map   (manager)   — save the mapping.
+  GET  /api/doors/booking-map   (signed-in) — rooms + doors + mapping + member door.
+  PUT  /api/doors/booking-map   (manager)   — save mapping / member door.
   POST /api/doors/run           (cron)      — the reconciler tick.
 */
 
@@ -39,14 +44,14 @@ async function getBookingMap() {
     return data?.value && typeof data.value === "object" ? data.value : {};
   } catch { return {}; }
 }
-// Resolve a booked room to a GeoVision door via the map. Exact (normalised) name
-// wins; otherwise a containment match. Returns { ctrl, door, name } or null.
-function resolveDoor(room, map, gvDoors) {
-  const r = norm(room);
-  if (!r) return null;
-  let val = null;
-  for (const [k, v] of Object.entries(map)) if (norm(k) === r) { val = v; break; }
-  if (!val) for (const [k, v] of Object.entries(map)) { const nk = norm(k); if (nk && (r.includes(nk) || nk.includes(r))) { val = v; break; } }
+// Resolve a booking's room to a GeoVision door. Facility id (slug) is the key;
+// a normalised room-name match is kept as a fallback for older entries.
+function resolveDoor(span, map, gvDoors) {
+  let val = map[span.facilityId];
+  if (!val) {
+    const r = norm(span.room);
+    for (const [k, v] of Object.entries(map)) if (norm(k) === r) { val = v; break; }
+  }
   if (!val) return null;
   const [ctrl, door] = String(val).split(":").map(Number);
   if (!Number.isFinite(ctrl) || !Number.isFinite(door)) return null;
@@ -54,7 +59,7 @@ function resolveDoor(room, map, gvDoors) {
   return { ctrl, door, name: gv?.name || `Door ${ctrl}:${door}` };
 }
 
-// Climate zone resolution stays name/env-based (Pro1 not wired — dry runs).
+// Climate zone resolution stays name/env-based (HVAC deferred — dry runs).
 function zoneForRoom(room) {
   const r = norm(room);
   if (!r) return null;
@@ -64,39 +69,19 @@ function zoneForRoom(room) {
   return null;
 }
 
-// Reservations (yesterday..tomorrow) as plain spans.
-async function fetchSpans() {
-  const items = await fetchReservations(isoDay(-1), isoDay(1));
-  return items
-    .filter((r) => !r.IsCancelled && !r.AllDay && (r.Start || r.StartDate) && (r.End || r.EndDate))
-    .map((r) => ({
-      id: r.ReservationId ?? r.Id,
-      start: new Date(r.Start || r.StartDate).getTime(),
-      end: new Date(r.End || r.EndDate).getTime(),
-      room: r.Location?.Name || r.LocationName || "",
-      activity: r.Title || r.AdminBooking?.Name || "Reservation",
-    }));
-}
-
-// Distinct bookable room names over the next month, for the mapping UI.
-async function fetchRoomNames() {
-  try {
-    const items = await fetchReservations(isoDay(-1), isoDay(30));
-    const names = new Set();
-    for (const r of items) { const n = r.Location?.Name || r.LocationName; if (n) names.add(n); }
-    return [...names].sort((a, b) => a.localeCompare(b));
-  } catch { return []; }
-}
+// Confirmed, approved bookings yesterday..tomorrow (buffer-aware spans).
+const fetchSpans = () => fetchBookingSpans(isoDay(-1), isoDay(1));
 
 // Door windows: unlock before start, relock after end.
 function doorWindows(spans, map, gvDoors) {
   const lead = config.doors.leadMin * 60000, lag = config.doors.lagMin * 60000, now = Date.now();
   return spans
     .map((s) => {
-      const d = resolveDoor(s.room, map, gvDoors);
-      const unlockAt = s.start - lead, relockAt = s.end + lag;
+      const d = resolveDoor(s, map, gvDoors);
+      const unlockAt = Math.min(s.start - lead, s.accessFrom);
+      const relockAt = Math.max(s.end + lag, s.accessTo);
       return {
-        id: s.id, room: s.room, activity: s.activity,
+        id: s.id, code: s.code, room: s.room, facilityId: s.facilityId, activity: s.activity, who: s.who,
         doorKey: d ? `${d.ctrl}:${d.door}` : null, ctrl: d?.ctrl, door: d?.door, doorName: d?.name || null,
         unlockAt, relockAt,
         status: now < unlockAt ? "scheduled" : now < relockAt ? "open" : "done",
@@ -132,12 +117,14 @@ async function gvForce(ctrl, door, opKey) {
   if (!(p?.success === 1 || p?.success === true)) throw new Error(`GeoVision ${opKey} failed`);
 }
 
+const loadAll = () => Promise.all([fetchSpans(), getBookingMap(), gvDoorTree().catch(() => [])]);
+
 // Today's windows for the Bookings/Automation UI.
 doorsRouter.get(
   "/schedule",
   requireAuth,
-  guard("amilia", async () => {
-    const [spans, map, gvDoors] = await Promise.all([fetchSpans(), getBookingMap(), gvDoorTree().catch(() => [])]);
+  guard("interactive", async () => {
+    const [spans, map, gvDoors] = await loadAll();
     return {
       leadMin: config.doors.leadMin,
       lagMin: config.doors.lagMin,
@@ -152,31 +139,47 @@ doorsRouter.get(
   })
 );
 
-// The room→door mapping surface: bookable rooms, real doors, current map.
+// The mapping surface: Interactive rooms, real doors, current map, member door.
 doorsRouter.get(
   "/booking-map",
   requireAuth,
-  guard("amilia", async () => {
-    const [rooms, doors, map] = await Promise.all([fetchRoomNames(), gvDoorTree().catch(() => []), getBookingMap()]);
-    return { rooms, doors: doors || [], map, leadMin: config.doors.leadMin, lagMin: config.doors.lagMin, geovisionLive: config.geovision.configured };
+  guard("interactive", async () => {
+    const [rooms, doors, map, memberDoor] = await Promise.all([
+      fetchFacilities(), gvDoorTree().catch(() => []), getBookingMap(), memberDoorSetting(),
+    ]);
+    return {
+      rooms: rooms.map((r) => ({ id: r.id, name: r.name, color: r.color, setupMin: r.setupMin, cleanupMin: r.cleanupMin })),
+      doors: doors || [], map, memberDoor,
+      leadMin: config.doors.leadMin, lagMin: config.doors.lagMin, geovisionLive: config.geovision.configured,
+    };
   })
 );
 
-// Save the mapping (managers/admins). Values must be "ctrl:door".
+// Save the mapping and/or the member door (managers/admins). Values "ctrl:door".
 doorsRouter.put(
   "/booking-map",
   requireAuth,
   requireManager,
-  guard("amilia", async (req) => {
-    const incoming = req.body && typeof req.body.map === "object" ? req.body.map : {};
-    const clean = {};
-    for (const [room, val] of Object.entries(incoming)) {
-      if (val && /^\d+:\d+$/.test(String(val))) clean[String(room)] = String(val);
+  guard("interactive", async (req) => {
+    const stamp = new Date().toISOString();
+    const out = {};
+    if (req.body && typeof req.body.map === "object") {
+      const clean = {};
+      for (const [room, val] of Object.entries(req.body.map)) {
+        if (val && /^\d+:\d+$/.test(String(val))) clean[String(room)] = String(val);
+      }
+      await supabaseAdmin.from("app_settings").upsert({ key: "door_booking_map", value: clean, updated_at: stamp }, { onConflict: "key" });
+      logAudit(req, "doors.booking-map", null, { rooms: Object.keys(clean).length });
+      out.map = clean;
     }
-    await supabaseAdmin.from("app_settings").upsert(
-      { key: "door_booking_map", value: clean, updated_at: new Date().toISOString() }, { onConflict: "key" });
-    logAudit(req, "doors.booking-map", null, { rooms: Object.keys(clean).length });
-    return { map: clean };
+    if (req.body && "memberDoor" in req.body) {
+      const v = String(req.body.memberDoor || "");
+      const door = /^\d+:\d+$/.test(v) ? v : "";
+      await supabaseAdmin.from("app_settings").upsert({ key: "member_door", value: { door }, updated_at: stamp }, { onConflict: "key" });
+      logAudit(req, "doors.member-door", door || null, {});
+      out.memberDoor = door;
+    }
+    return out;
   })
 );
 
@@ -192,12 +195,12 @@ function cronAuth(req, res, next) {
 // The reconciler tick. Acts only on window edges that passed within the lookback
 // period, so a delayed cron still catches them and manual overrides outside the
 // edges are left alone. Doors → GeoVision; climate → Home Assistant (dry-run
-// until Pro1/HA is wired).
+// until thermostats are installed).
 doorsRouter.all(
   "/run",
   cronAuth,
-  guard("amilia", async (req) => {
-    const [spans, map, gvDoors] = await Promise.all([fetchSpans(), getBookingMap(), gvDoorTree().catch(() => [])]);
+  guard("interactive", async (req) => {
+    const [spans, map, gvDoors] = await loadAll();
     const now = Date.now();
     const lookback = config.doors.lookbackMin * 60000;
     const actions = [];

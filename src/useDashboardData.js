@@ -48,10 +48,13 @@ export function useDashboardData(mock) {
     const mockFlags = { amilia: true, hik: true, procare: true };
 
     const tasks = [];
-    if (cfg.amilia) {
+    // Bookings + memberships now come from SquareOne Interactive (Amilia is
+    // being retired). Amilia stays as a fallback only while both are configured.
+    if (cfg.interactive || cfg.amilia) {
+      const base = cfg.interactive ? "/api/interactive" : "/api/amilia";
       tasks.push(
-        getJson("/api/amilia/bookings").then((r) => { const d = unwrap(r); if (d) { next.bookings = d; mockFlags.amilia = false; } }).catch(() => {}),
-        getJson("/api/amilia/members/summary").then((r) => { const d = unwrap(r); if (d) { next.members = d; mockFlags.amilia = false; } }).catch(() => {})
+        getJson(`${base}/bookings`).then((r) => { const d = unwrap(r); if (d) { next.bookings = d; mockFlags.amilia = false; } }).catch(() => {}),
+        getJson(`${base}/members/summary`).then((r) => { const d = unwrap(r); if (d) { next.members = d; mockFlags.amilia = false; } }).catch(() => {})
       );
     }
     if (cfg.hik) {

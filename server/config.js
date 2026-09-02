@@ -69,6 +69,26 @@ export const config = {
     },
   },
 
+  // SquareOne Interactive — the in-house platform that replaced Amilia for
+  // fitness memberships and ALL room bookings. It has its own Supabase project;
+  // we read its tables directly with a service-role key (bypasses RLS), which
+  // is how build.md in that repo says the sibling dashboard should integrate:
+  // "bookings drive door schedules and HVAC pre-conditioning". If both apps
+  // happen to share one Supabase project, point these at the same values.
+  interactive: {
+    url: process.env.INTERACTIVE_SUPABASE_URL || "",
+    serviceKey: process.env.INTERACTIVE_SUPABASE_SERVICE_KEY || "",
+    // Shared secret the Interactive app sends (x-door-token) when a member taps
+    // "Unlock door" in their portal — must equal DOOR_SERVICE_TOKEN over there.
+    doorServiceToken: process.env.DOOR_SERVICE_TOKEN || "",
+    // Which GeoVision door is "the fitness door" for member unlocks, as
+    // "ctrl:door". Can also be set in the Automation tab (app_settings wins).
+    memberDoor: process.env.MEMBER_DOOR || "",
+    get configured() {
+      return Boolean(this.url && this.serviceKey);
+    },
+  },
+
   hik: {
     // EZVIZ / Hik-Connect Open Platform. Region host varies by account
     // (e.g. https://open.ezvizlife.com or https://isgpopen.ezvizlife.com).

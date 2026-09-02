@@ -2,7 +2,7 @@ import { Router } from "express";
 import { config, guard, http } from "../config.js";
 import { requireAuth, requireAdmin, logAudit } from "../auth.js";
 import { getCachedToken, setCachedToken } from "../tokenStore.js";
-import { allMembershipPersons } from "./amilia.js";
+import { allMembershipPersons } from "./interactive.js";
 
 export const alertsRouter = Router();
 
@@ -83,7 +83,7 @@ function label(entry) {
 // Diff the roster against last-seen and text the owner about anyone new.
 // Called from the /api/doors/run cron tick; must never throw.
 export async function checkNewMembers(req) {
-  if (!config.amilia.configured) return { skipped: "amilia not configured" };
+  if (!config.interactive.configured) return { skipped: "interactive not configured" };
   try {
     const roster = await allMembershipPersons();
     const current = new Map(roster.map((e) => [`${e.person.Id}:${e.membershipId}`, e]));
