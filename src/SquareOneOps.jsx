@@ -2242,10 +2242,11 @@ function Automation({ role, authEnabled }) {
         {data.rooms.length === 0
           ? <Empty text="No rooms found in SquareOne Interactive yet — check INTERACTIVE_SUPABASE_URL / _SERVICE_KEY in Settings → Diagnostics." />
           : data.rooms.map((room) => (
-              <div key={room.id} className="flex items-center justify-between gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div key={room.id} className="flex items-center justify-between gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}`, opacity: room.active === false ? 0.6 : 1 }}>
                 <span className="flex items-center gap-2" style={{ fontSize: 14, minWidth: 0 }}>
                   <span style={{ width: 10, height: 10, borderRadius: 3, background: room.color || C.cyan, flexShrink: 0 }} />
                   <span>{room.name}</span>
+                  {room.active === false && <span style={{ fontSize: 11, fontFamily: mono, color: C.amber }}>inactive in Interactive — not bookable</span>}
                   {(room.setupMin || room.cleanupMin) ? <span style={{ fontSize: 11, fontFamily: mono, color: C.dim }}>+{room.setupMin || 0}/{room.cleanupMin || 0} min</span> : null}
                 </span>
                 <select value={(data.map || {})[room.id] || ""} disabled={!canEdit} onChange={(e) => setDoor(room.id, e.target.value)} style={selStyle}>{doorOptions}</select>

@@ -122,7 +122,7 @@ export async function fetchBookingSpans(fromIso, toIso) {
 
 // Active rooms, with today's opening hours from facilities.booking_hours
 // (7-entry array Sun..Sat of { closed, openH, closeH }).
-export async function fetchFacilities() {
+export async function fetchFacilities(includeInactive = false) {
   const { rows: data } = await selectFallback(
     "facilities",
     ["id", "name", "color", "active", "sort", "booking_hours", "setup_min", "cleanup_min"],
@@ -132,11 +132,11 @@ export async function fetchFacilities() {
   const wd = new Intl.DateTimeFormat("en-US", { timeZone: tz(), weekday: "short" }).format(new Date());
   const dow = Math.max(0, ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(wd));
   return (data || [])
-    .filter((f) => f.active !== false)
+    .filter((f) => includeInactive || f.active !== false)
     .map((f) => {
       const h = Array.isArray(f.booking_hours) ? f.booking_hours[dow] : null;
       const hours = !h ? "" : h.closed ? "Closed today" : `${fmtHour(h.openH)} – ${fmtHour(h.closeH)}`;
-      return { id: f.id, name: f.name, color: f.color, hours, setupMin: f.setup_min, cleanupMin: f.cleanup_min };
+      return { id: f.id, name: f.name, color: f.color, hours, active: f.active !== false, setupMin: f.setup_min, cleanupMin: f.cleanup_min };
     });
 }
 

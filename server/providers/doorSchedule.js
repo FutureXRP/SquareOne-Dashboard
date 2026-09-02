@@ -6,6 +6,7 @@ import { haConfigured, haOps } from "../haService.js";
 import { checkNewMembers } from "./memberAlerts.js";
 import { gvDoorOp, gvDoorTree, GV_DOOR_OPS } from "./buildingClouds.js";
 import { memberDoorSetting } from "./memberDoor.js";
+import { getCachedToken, setCachedToken } from "../tokenStore.js";
 
 export const doorsRouter = Router();
 
@@ -18,10 +19,14 @@ export const doorsRouter = Router();
   earlier/later:
       unlockAt = min(start − DOOR_UNLOCK_LEAD_MIN, start − setup_min)
       relockAt = max(end   + DOOR_RELOCK_LAG_MIN,  end   + cleanup_min)
-  At unlockAt the door is FORCE_UNLOCKed (held open); at relockAt it's released
+  Inside a window the door is FORCE_UNLOCKed (held open); outside it's released
   back to its normal schedule. Overlapping bookings hold it open until the last
-  one clears; the reconciler acts only on window EDGES, so staff can still lock
-  or unlock a door mid-day without the cron fighting them.
+  one clears. Doors are reconciled by STATE, not by edge: whatever tick lands
+  inside a window makes sure the door is open, whatever tick lands outside makes
+  sure it's released — but only when that differs from the last state THIS
+  scheduler applied (remembered per door in the kv store). So a sparse or late
+  cron still converges, and a door someone locked or unlocked by hand isn't
+  re-fought every five minutes.
 
   Room → door mapping is admin-managed (app_settings 'door_booking_map', keyed
   by Interactive facility id like "gym" → "ctrl:door"). Unmapped rooms do nothing.
@@ -117,6 +122,34 @@ async function gvForce(ctrl, door, opKey) {
   if (!(p?.success === 1 || p?.success === true)) throw new Error(`GeoVision ${opKey} failed`);
 }
 
+// State-based door reconciliation (see header). Per mapped door: desired =
+// open if any window covers `now`; act only when that differs from the last
+// state we applied. State is recorded only after a real, successful command,
+// so dry runs never fake it.
+const DOOR_STATE = "door-state";
+const STATE_TTL = 30 * 86400000;
+async function reconcileDoors(windows, live, req, actions, now) {
+  const keys = [...new Set(windows.map((w) => w.doorKey).filter(Boolean))];
+  for (const key of keys) {
+    const mine = windows.filter((w) => w.doorKey === key);
+    const covering = mine.filter((w) => w.unlockAt <= now && now < w.relockAt);
+    const wantOpen = covering.length > 0;
+    const last = (await getCachedToken(DOOR_STATE, key))?.token || "closed";
+    if (wantOpen === (last === "open")) continue;
+    // Attribute the action to the booking that drives it: the current window
+    // when opening, the most recently ended one when releasing.
+    const w = covering[0] || mine.filter((x) => x.relockAt <= now).sort((a, b) => b.relockAt - a.relockAt)[0] || mine[0];
+    let executed = false, error = null;
+    if (live) {
+      try { await gvForce(w.ctrl, w.door, wantOpen ? "force-unlock" : "release"); executed = true; }
+      catch (e) { error = e.message; }
+      if (executed) await setCachedToken(DOOR_STATE, key, wantOpen ? "open" : "closed", {}, now + STATE_TTL);
+    }
+    logAudit(req, wantOpen ? "doors.auto-unlock" : "doors.auto-lock", w.id, { room: w.room, activity: w.activity, door: w.doorName, executed, ...(error ? { error } : {}) });
+    actions.push({ target: key, name: w.doorName, action: wantOpen ? "unlock" : "lock", room: w.room, activity: w.activity, executed, error });
+  }
+}
+
 const loadAll = () => Promise.all([fetchSpans(), getBookingMap(), gvDoorTree().catch(() => [])]);
 
 // Today's windows for the Bookings/Automation UI.
@@ -145,10 +178,12 @@ doorsRouter.get(
   requireAuth,
   guard("interactive", async () => {
     const [rooms, doors, map, memberDoor] = await Promise.all([
-      fetchFacilities(), gvDoorTree().catch(() => []), getBookingMap(), memberDoorSetting(),
+      fetchFacilities(true), gvDoorTree().catch(() => []), getBookingMap(), memberDoorSetting(),
     ]);
     return {
-      rooms: rooms.map((r) => ({ id: r.id, name: r.name, color: r.color, setupMin: r.setupMin, cleanupMin: r.cleanupMin })),
+      // Inactive rooms are included (flagged) so they can be pre-mapped; the
+      // scheduler itself only ever sees bookings, which only active rooms take.
+      rooms: rooms.map((r) => ({ id: r.id, name: r.name, color: r.color, active: r.active, setupMin: r.setupMin, cleanupMin: r.cleanupMin })),
       doors: doors || [], map, memberDoor,
       leadMin: config.doors.leadMin, lagMin: config.doors.lagMin, geovisionLive: config.geovision.configured,
     };
@@ -228,12 +263,7 @@ doorsRouter.all(
       }
     };
 
-    await reconcile(
-      doorWindows(spans, map, gvDoors), "doorKey", "unlockAt", "relockAt",
-      (w) => gvForce(w.ctrl, w.door, "force-unlock"), (w) => gvForce(w.ctrl, w.door, "release"),
-      { on: { name: "unlock", audit: "doors.auto-unlock" }, off: { name: "lock", audit: "doors.auto-lock" } },
-      config.geovision.configured
-    );
+    await reconcileDoors(doorWindows(spans, map, gvDoors), config.geovision.configured, req, actions, now);
     await reconcile(
       climateWindows(spans), "zoneId", "preAt", "postAt",
       (w) => haOps.setTemp(w.zoneId, w.eventTemp), (w) => haOps.setTemp(w.zoneId, w.idleTemp),
