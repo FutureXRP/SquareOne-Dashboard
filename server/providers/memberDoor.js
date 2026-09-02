@@ -41,12 +41,33 @@ const DOOR_NAME = (process.env.MEMBER_DOOR_NAME || "fitnesszone").toLowerCase();
 const gvConfigured = () =>
   Boolean(config.geovision?.baseUrl && config.geovision?.username && config.geovision?.password);
 
-// The fitness door in GeoVision: live controller tree first (real names),
-// GV_DOORS env override as fallback.
+// An explicit door pick as "ctrl:door" — chosen in Automation → Member fitness
+// door (app_settings 'member_door'), or the MEMBER_DOOR env var. Empty string
+// when neither is set, in which case the name match below decides. Exported
+// for the Automation tab's read/write of the setting (doorSchedule.js).
+export async function memberDoorSetting() {
+  if (supabaseAdmin) {
+    try {
+      const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "member_door").maybeSingle();
+      const v = data?.value?.door ?? data?.value;
+      if (typeof v === "string" && /^\d+:\d+$/.test(v)) return v;
+    } catch { /* fall through to env */ }
+  }
+  const env = config.interactive?.memberDoor || "";
+  return /^\d+:\d+$/.test(env) ? env : "";
+}
+
+// The fitness door in GeoVision: an explicit pick wins; otherwise the live
+// controller tree by name (real names), GV_DOORS env override as fallback.
 async function findGvDoor() {
   let doors = null;
   try { doors = await gvDoorTree(); } catch { /* fall through to config */ }
   if (!doors || !doors.length) doors = config.geovision.doors || [];
+  const pick = await memberDoorSetting();
+  if (pick) {
+    const [ctrl, door] = pick.split(":").map(Number);
+    return doors.find((d) => d.ctrl === ctrl && d.door === door) || { name: `Door ${pick}`, ctrl, door };
+  }
   return doors.find((d) => (d.name || "").toLowerCase().includes(DOOR_NAME)) || null;
 }
 

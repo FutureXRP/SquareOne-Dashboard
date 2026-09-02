@@ -174,3 +174,27 @@ the short version:
 - With auth on, every `/api` call requires a valid Supabase session; hub actions are
   written to the `audit_log`. Turn on MFA for admin accounts since the app can control
   physical doors and the alarm.
+
+## SquareOne Interactive (bookings + memberships)
+
+Amilia has been retired for fitness memberships and room bookings — both now
+live in the in-house **SquareOne Interactive** app
+(github.com/FutureXRP/SquareOne-Interactive). This dashboard reads its
+Supabase tables directly with a service-role key, which is the integration
+its `build.md` calls for ("bookings drive door schedules and HVAC
+pre-conditioning"). Set these in Vercel → Environment Variables:
+
+| Variable | What it is |
+|---|---|
+| `INTERACTIVE_SUPABASE_URL` | The Interactive app's Supabase project URL (its `NEXT_PUBLIC_SUPABASE_URL`). |
+| `INTERACTIVE_SUPABASE_SERVICE_KEY` | That project's **service-role** key (its `SUPABASE_SERVICE_ROLE_KEY`). Server-only; bypasses RLS. If both apps share one Supabase project, use the same values as `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`. |
+| `DOOR_SERVICE_TOKEN` | Long random string, set to the **same value** in the Interactive app. It sends it as `x-door-token` when a member taps *Unlock door*, which calls `POST /api/member-door/unlock` here. |
+| `MEMBER_DOOR` | Optional: which GeoVision door is the fitness door, as `ctrl:door`. Usually set instead in **Automation → Member fitness door**. |
+
+What flows from Interactive:
+- **Bookings tab / Home** — confirmed bookings and unpaid holds (`/api/interactive/bookings`).
+- **Members tab** — live subscriptions, MRR, new/cancelled this month, inside-now (`/api/interactive/members/summary`).
+- **Door schedule** — only `status = confirmed` **and** staff-approved bookings open doors, using each booking's setup/cleanup buffers (or `DOOR_UNLOCK_LEAD_MIN` / `DOOR_RELOCK_LAG_MIN`, whichever is wider). Map rooms to doors in **Automation**. Standing reservations are already materialised as bookings in Interactive, so they just work.
+- **New-member alerts** — diff of the live membership roster on each cron tick.
+
+HVAC pre-conditioning is intentionally left dry-run until thermostats are installed.
