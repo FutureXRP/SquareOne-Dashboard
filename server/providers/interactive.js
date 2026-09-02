@@ -61,29 +61,47 @@ function fmtHour(h) {
 
 // --- Bookings ------------------------------------------------------------------
 
-const BOOKING_COLS = "id, code, facility_id, title, client_name, during, status, approved_at, hold_expires_at, setup_min, cleanup_min, price_cents, canceled_at, facilities(name, color)";
+// The live database may be behind the repo's migrations (e.g. no setup/cleanup
+// buffers or approval column yet). Like the Interactive app's own SELECT_SETS
+// fallback, select the richest column set and drop any column Postgres says
+// doesn't exist, so a partially-migrated DB still works. Returns the rows plus
+// the column list that actually resolved, so callers can tell "column absent"
+// from "value null".
+async function selectFallback(table, cols, build = (q) => q) {
+  let list = [...cols];
+  for (let i = 0; i < 12; i++) {
+    const { data, error } = await build(db().from(table).select(list.join(", ")));
+    if (!error) return { rows: data || [], cols: list };
+    const m = /column \w+\.(\w+) does not exist/i.exec(error.message);
+    const missing = m && list.find((c) => c === m[1] || c.startsWith(`${m[1]}(`));
+    if (missing) { list = list.filter((c) => c !== missing); continue; }
+    throw new Error(`Interactive ${table}: ${error.message}`);
+  }
+  throw new Error(`Interactive ${table}: too many missing columns`);
+}
 
-// Raw rows overlapping [fromIso, toIso) in the given statuses, newest-first
-// tie-break by start. Expired-but-unreleased holds are dropped here so callers
-// never see a hold the app would already consider dead.
+const BOOKING_COLS = ["id", "code", "facility_id", "title", "client_name", "during", "status", "approved_at", "hold_expires_at", "setup_min", "cleanup_min", "price_cents", "facilities(name, color)"];
+
+// Raw rows overlapping [fromIso, toIso) in the given statuses. Expired-but-
+// unreleased holds are dropped here so callers never see a hold the app would
+// already consider dead.
 async function bookingRows(fromIso, toIso, statuses) {
-  const { data, error } = await db()
-    .from("bookings")
-    .select(BOOKING_COLS)
-    .overlaps("during", `[${fromIso},${toIso})`)
-    .in("status", statuses);
-  if (error) throw new Error(`Interactive bookings: ${error.message}`);
+  const { rows, cols } = await selectFallback("bookings", BOOKING_COLS, (q) =>
+    q.overlaps("during", `[${fromIso},${toIso})`).in("status", statuses));
   const now = Date.now();
-  return (data || []).filter((r) => !(r.status === "hold" && r.hold_expires_at && new Date(r.hold_expires_at).getTime() < now));
+  return {
+    rows: rows.filter((r) => !(r.status === "hold" && r.hold_expires_at && new Date(r.hold_expires_at).getTime() < now)),
+    hasApproval: cols.includes("approved_at"),   // no column = no review feature = all confirmed are approved
+  };
 }
 
 // Normalised spans for the door scheduler — CONFIRMED and staff-approved only.
 // `start/end` are the billed hours; `accessFrom/accessTo` add the setup/cleanup
 // buffers (what the door actually needs to honour).
 export async function fetchBookingSpans(fromIso, toIso) {
-  const rows = await bookingRows(fromIso, toIso, ["confirmed"]);
+  const { rows, hasApproval } = await bookingRows(fromIso, toIso, ["confirmed"]);
   return rows
-    .filter((r) => r.approved_at)
+    .filter((r) => !hasApproval || r.approved_at)
     .map((r) => {
       const d = parseDuring(r.during);
       if (!d) return null;
@@ -105,11 +123,11 @@ export async function fetchBookingSpans(fromIso, toIso) {
 // Active rooms, with today's opening hours from facilities.booking_hours
 // (7-entry array Sun..Sat of { closed, openH, closeH }).
 export async function fetchFacilities() {
-  const { data, error } = await db()
-    .from("facilities")
-    .select("id, name, color, active, sort, booking_hours, setup_min, cleanup_min")
-    .order("sort");
-  if (error) throw new Error(`Interactive facilities: ${error.message}`);
+  const { rows: data } = await selectFallback(
+    "facilities",
+    ["id", "name", "color", "active", "sort", "booking_hours", "setup_min", "cleanup_min"],
+    (q) => q.order("sort")
+  );
   // Weekday index in the org's timezone (booking_hours is Sun=0 … Sat=6).
   const wd = new Intl.DateTimeFormat("en-US", { timeZone: tz(), weekday: "short" }).format(new Date());
   const dow = Math.max(0, ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(wd));
@@ -227,19 +245,20 @@ interactiveRouter.get(
   guard("interactive", async (req) => {
     const from = req.query.from || isoDay(0);
     const to = req.query.to || isoDay(89);
-    const rows = await bookingRows(from, to, ["hold", "confirmed"]);
+    const { rows, hasApproval } = await bookingRows(from, to, ["hold", "confirmed"]);
     return rows
       .map((r) => {
         const d = parseDuring(r.during);
         if (!d) return null;
+        const approved = !hasApproval || Boolean(r.approved_at);
         return {
           id: r.id, code: r.code, _sort: d.from.getTime(),
           date: fmtDate(d.from), start: fmtTime(d.from), end: fmtTime(d.to),
           room: r.facilities?.name || r.facility_id, facilityId: r.facility_id,
           activity: r.title || "Reservation", who: r.client_name || "",
-          type: r.status === "hold" ? "Hold" : r.approved_at ? "" : "In review",
+          type: r.status === "hold" ? "Hold" : approved ? "" : "In review",
           color: r.facilities?.color || null,
-          status: r.status === "hold" ? "hold" : r.approved_at ? "confirmed" : "review",
+          status: r.status === "hold" ? "hold" : approved ? "confirmed" : "review",
         };
       })
       .filter(Boolean)
