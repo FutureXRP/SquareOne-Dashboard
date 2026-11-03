@@ -14,7 +14,9 @@ import { haOps } from "../haService.js";
   apps:
 
     DOOR_SERVICE_TOKEN=<long random string>   (both apps)
-    MEMBER_DOOR_NAME=fitnesszone              (optional; name match, default "fitnesszone")
+    MEMBER_DOOR_NAMES=fitnesszone,medicalent  (optional; allowed doors by name match,
+                                               default "fitnesszone,medicalent";
+                                               legacy MEMBER_DOOR_NAME feeds the first slot)
     MEMBER_DOOR_RELOCK_SECONDS=7              (only used on the Home Assistant path)
 
   Door control paths, same order the Security tab works today:
@@ -33,10 +35,16 @@ import { haOps } from "../haService.js";
 export const memberDoorRouter = Router();
 
 const RELOCK_SECONDS = Math.max(3, Number(process.env.MEMBER_DOOR_RELOCK_SECONDS || 7));
-// The fitness center door is named "FitnessZone" in GV-Access (it was
-// "WorkOutRM" until August 2026 — IT renamed it). MEMBER_DOOR_NAME
-// overrides the default if it ever moves again.
-const DOOR_NAME = (process.env.MEMBER_DOOR_NAME || "fitnesszone").toLowerCase();
+// Doors members may open from their account page, by GV-Access name
+// match. "FitnessZone" is the gym entrance (it was "WorkOutRM" until
+// August 2026 — IT renamed it); "MedicalEnt" is the medical building
+// entrance members also use. MEMBER_DOOR_NAMES overrides the whole
+// list; legacy MEMBER_DOOR_NAME still renames the first (fitness) slot.
+const DOOR_NAMES = (
+  process.env.MEMBER_DOOR_NAMES
+  || `${process.env.MEMBER_DOOR_NAME || "fitnesszone"},medicalent`
+).toLowerCase().split(/[\s,;]+/).filter(Boolean);
+const DOOR_NAME = DOOR_NAMES[0]; // the fitness door — legacy pick/HA paths
 
 const gvConfigured = () =>
   Boolean(config.geovision?.baseUrl && config.geovision?.username && config.geovision?.password);
@@ -57,18 +65,22 @@ export async function memberDoorSetting() {
   return /^\d+:\d+$/.test(env) ? env : "";
 }
 
-// The fitness door in GeoVision: an explicit pick wins; otherwise the live
-// controller tree by name (real names), GV_DOORS env override as fallback.
-async function findGvDoor() {
+// A member door in GeoVision. The explicit Automation-tab pick only ever
+// meant the fitness door, so it wins for that slot alone; every door is
+// otherwise found in the live controller tree by name (GV_DOORS env as
+// fallback).
+async function findGvDoor(requested) {
   let doors = null;
   try { doors = await gvDoorTree(); } catch { /* fall through to config */ }
   if (!doors || !doors.length) doors = config.geovision.doors || [];
-  const pick = await memberDoorSetting();
-  if (pick) {
-    const [ctrl, door] = pick.split(":").map(Number);
-    return doors.find((d) => d.ctrl === ctrl && d.door === door) || { name: `Door ${pick}`, ctrl, door };
+  if (requested === DOOR_NAME) {
+    const pick = await memberDoorSetting();
+    if (pick) {
+      const [ctrl, door] = pick.split(":").map(Number);
+      return doors.find((d) => d.ctrl === ctrl && d.door === door) || { name: `Door ${pick}`, ctrl, door };
+    }
   }
-  return doors.find((d) => (d.name || "").toLowerCase().includes(DOOR_NAME)) || null;
+  return doors.find((d) => (d.name || "").toLowerCase().includes(requested)) || null;
 }
 
 memberDoorRouter.post("/unlock", async (req, res) => {
@@ -79,15 +91,22 @@ memberDoorRouter.post("/unlock", async (req, res) => {
   }
 
   const member = typeof req.body?.member === "string" ? req.body.member.slice(0, 120) : "member";
-  let doorLabel = DOOR_NAME;
+  // Which door — the fitness door when unsaid (old store builds), and
+  // only ever one from the allowlist: this endpoint opens member doors,
+  // not whatever name a caller dreams up.
+  const requested = (typeof req.body?.door === "string" ? req.body.door : DOOR_NAME).toLowerCase().trim();
+  if (!DOOR_NAMES.includes(requested)) {
+    return res.status(400).json({ ok: false, message: `"${requested}" is not a member door. Allowed: ${DOOR_NAMES.join(", ")}.` });
+  }
+  let doorLabel = requested;
   let mode = "geovision";
   let relockSeconds = 6; // GV buzz-open is a momentary pulse; ~6s is typical
 
   try {
     if (gvConfigured()) {
-      const door = await findGvDoor();
+      const door = await findGvDoor(requested);
       if (!door) {
-        return res.status(502).json({ ok: false, message: `No door matching "${DOOR_NAME}" found on the controller. Set MEMBER_DOOR_NAME to part of the door's name in GV-Access.` });
+        return res.status(502).json({ ok: false, message: `No door matching "${requested}" found on the controller. The door's GV-Access name must contain that text (MEMBER_DOOR_NAMES overrides the list).` });
       }
       doorLabel = door.name;
       const r = await gvDoorOp(door.ctrl, door.door, "UNLOCK_DOOR");
@@ -99,7 +118,7 @@ memberDoorRouter.post("/unlock", async (req, res) => {
       // Home Assistant fallback (relock ourselves — HA locks aren't momentary).
       mode = "homeassistant";
       relockSeconds = RELOCK_SECONDS;
-      const doorId = process.env.MEMBER_DOOR_ID || "fit";
+      const doorId = requested === DOOR_NAME ? (process.env.MEMBER_DOOR_ID || "fit") : requested;
       doorLabel = doorId;
       await haOps.unlockDoor(doorId);
       setTimeout(() => {
