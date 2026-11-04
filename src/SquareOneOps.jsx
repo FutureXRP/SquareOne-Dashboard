@@ -205,6 +205,26 @@ export default function SquareOneOps({ user, role, roleTabs = {}, entity = null,
     return r.data;
   }, [pushLog]);
 
+  // Booking-schedule heartbeat: while any dashboard is open, poke the door /
+  // climate reconciler every 2 minutes (server gates it to ~90s globally) so
+  // bookings drive doors even when no external cron is reaching the server.
+  // Real actions it takes land in the activity log.
+  useEffect(() => {
+    if (!connected.interactive) return;
+    let stop = false;
+    const beat = () => apiFetch("/api/doors/heartbeat", { method: "POST" }).then((r) => r.json())
+      .then((r) => {
+        if (stop || !r?.ok || !r.data?.ran) return;
+        for (const a of r.data.actions || []) {
+          if (!a.executed) continue;
+          pushLog(`Schedule: ${a.action === "unlock" ? "unlocked" : a.action === "lock" ? "relocked" : a.action === "hold" ? "set hold on" : "resumed schedule on"} ${a.name}${a.room ? ` for ${a.room}` : ""}`, a.action === "unlock" || a.action === "hold" ? "amber" : "go");
+        }
+      }).catch(() => {});
+    beat();
+    const id = setInterval(() => { if (document.visibilityState === "visible") beat(); }, 120_000);
+    return () => { stop = true; clearInterval(id); };
+  }, [connected.interactive, pushLog]);
+
   // Sidebar unread dot for Chat: slow poll of the chat summary vs the local
   // read marks (kept in localStorage, updated by the Chat tab as you read).
   const [chatUnread, setChatUnread] = useState(false);
@@ -2419,8 +2439,25 @@ function Automation({ role, authEnabled }) {
     </div>
   ));
 
+  const tick = sched?.lastTick;
+  const tickAgeMin = tick?.at ? Math.round((Date.now() - new Date(tick.at).getTime()) / 60000) : null;
+  const tickStale = tickAgeMin == null || tickAgeMin > 15;
+  const ago = tickAgeMin == null ? "never" : tickAgeMin < 1 ? "just now" : tickAgeMin < 60 ? `${tickAgeMin} min ago` : tickAgeMin < 1440 ? `${Math.round(tickAgeMin / 60)} h ago` : `${Math.round(tickAgeMin / 1440)} d ago`;
+
   return (
     <div className="grid gap-3">
+      {sched && (
+        <div className="flex items-center gap-3 flex-wrap" style={{ padding: "10px 14px", background: tickStale ? C.amberBg : C.goBg, border: `1px solid ${C.border}`, borderLeft: `3px solid ${tickStale ? C.amber : C.go}`, borderRadius: 6, fontSize: 12.5, fontFamily: mono }}>
+          {tickStale ? <AlertTriangle size={14} color={C.amber} /> : <CircleCheck size={14} color={C.go} />}
+          <span style={{ color: C.text }}>
+            Scheduler last ran <strong>{ago}</strong>{tick?.source ? ` (${tick.source === "cron" ? "external cron" : "open dashboard"})` : ""}
+            {tick?.errors ? <span style={{ color: C.red }}> · {tick.errors} failed action{tick.errors === 1 ? "" : "s"}</span> : ""}
+          </span>
+          <span style={{ color: C.mid, marginLeft: "auto" }}>
+            {sched.cronConfigured ? "cron secret set" : "CRON_SECRET not set"} · runs whenever this dashboard is open
+          </span>
+        </div>
+      )}
       <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, padding: "0 2px" }}>
         Bookings come from <strong>SquareOne Interactive</strong>. Map each room to the door that lets people in, and the
         schedule <strong>holds that door open</strong> around every confirmed booking — from its setup buffer (or
