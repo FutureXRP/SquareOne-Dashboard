@@ -197,4 +197,33 @@ What flows from Interactive:
 - **Door schedule** — only `status = confirmed` **and** staff-approved bookings open doors, using each booking's setup/cleanup buffers (or `DOOR_UNLOCK_LEAD_MIN` / `DOOR_RELOCK_LAG_MIN`, whichever is wider). Map rooms to doors in **Automation**. Standing reservations are already materialised as bookings in Interactive, so they just work.
 - **New-member alerts** — diff of the live membership roster on each cron tick.
 
-HVAC pre-conditioning is intentionally left dry-run until thermostats are installed.
+HVAC pre-conditioning runs through ThermoHub (next section) and stays dry-run
+until its token is set.
+
+## ThermoHub (ecobee thermostats)
+
+The thermostats are managed in **ThermoHub**
+(thermohub-web.thermohub-api.workers.dev). Its hub is a Home Assistant box on
+the on-site admin PC that talks to the ecobees and owns the weekly schedule
+profiles, motion overrides, smart recovery and holds. The dashboard talks only
+to ThermoHub's cloud API — never to the thermostats behind its back — so the hub
+never fights our changes. The calls are the ones its own web app makes:
+`GET /api/state`, `POST /api/thermostats/:id/hold` (`{heat, cool, until}`),
+`POST /api/thermostats/:id/resume`, `POST /api/thermostats/:id/mode`.
+
+ThermoHub's web app signs in with Microsoft 365, which a server can't do, so
+ThermoHub has to issue an **integration token** that it accepts as a bearer
+token. Ask whoever runs ThermoHub for one, then set in Vercel:
+
+| Variable | What it is |
+|---|---|
+| `THERMOHUB_TOKEN` | The integration token ThermoHub issued for this dashboard. Server-only. |
+| `THERMOHUB_API_URL` | Optional; defaults to `https://thermohub-api.thermohub-api.workers.dev`. |
+| `THERMOHUB_BUILDING` | Optional: only show thermostats in this ThermoHub building (name or id). |
+| `CLIMATE_EVENT_HEAT` / `CLIMATE_EVENT_COOL` | The hold a booked room gets (default 70° / 74°). |
+| `CLIMATE_PRE_LEAD_MIN` / `CLIMATE_POST_LAG_MIN` | Hold from N min before a booking until N min after (default 60 / 60). |
+
+What it drives:
+- **Home card + Climate tab** — live temperature, humidity, target, mode, equipment, motion, and hold status per thermostat. Managers/admins can set mode, place a temporary hold (heat/cool pair for 1–8 h or indefinitely) or resume the schedule. Every action is audited (`climate.hold`, `climate.resume`, `climate.mode`).
+- **Booking climate** — map rooms to thermostats in **Automation → Room → Thermostat mapping** (`app_settings.climate_booking_map`). The same `/api/doors/run` tick that drives doors places a ThermoHub hold at the event setpoints from `CLIMATE_PRE_LEAD_MIN` before each confirmed booking until `CLIMATE_POST_LAG_MIN` after, extends it across overlapping bookings, then resumes the schedule — only if the hold on record is ours, so a hold someone set by hand is left alone (`climate.auto-hold` / `climate.auto-resume`).
+- **Settings → Diagnostics → ThermoHub** — what the token can see (businesses, buildings, profiles, thermostats).

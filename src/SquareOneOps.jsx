@@ -182,6 +182,29 @@ export default function SquareOneOps({ user, role, roleTabs = {}, entity = null,
     return () => { stop = true; clearInterval(id); };
   }, []);
 
+  // Live thermostats via ThermoHub. null = loading; {configured:false} = no
+  // THERMOHUB_TOKEN yet. Refresh every 60s while visible (server caches reads).
+  const [thermo, setThermo] = useState(null);
+  const loadThermo = useCallback(() => apiFetch("/api/thermohub/thermostats").then((r) => r.json())
+    .then((r) => setThermo(r.ok ? { configured: true, ...r.data } : { configured: false, message: r.message }))
+    .catch(() => setThermo({ configured: false })), []);
+  useEffect(() => {
+    loadThermo();
+    const id = setInterval(() => { if (document.visibilityState === "visible") loadThermo(); }, 60_000);
+    return () => clearInterval(id);
+  }, [loadThermo]);
+  // One action path for hold / resume / mode: POST, take the fresh list the
+  // server returns, and log it. Throws so the caller can show the message.
+  const thermoAction = useCallback(async (id, action, body, msg) => {
+    const r = await apiFetch(`/api/thermohub/thermostats/${encodeURIComponent(id)}/${action}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+    }).then((res) => res.json());
+    if (!r.ok) throw new Error(r.message || `${action} failed`);
+    if (r.data?.thermostats) setThermo((t) => ({ ...(t || {}), configured: true, thermostats: r.data.thermostats }));
+    pushLog(msg, "cyan");
+    return r.data;
+  }, [pushLog]);
+
   // Sidebar unread dot for Chat: slow poll of the chat summary vs the local
   // read marks (kept in localStorage, updated by the Chat tab as you read).
   const [chatUnread, setChatUnread] = useState(false);
@@ -379,10 +402,10 @@ export default function SquareOneOps({ user, role, roleTabs = {}, entity = null,
             </div>
           </header>
           <div className="so-content">
-            <ConnectionBar connected={{ amilia: connected.amilia, hik: connected.hik, geovision: gvConnected, napco: !!napcoAlarm?.loggedIn, pro1: false, procare: connected.procare }} onReload={() => { reload(); reloadHub(); }} />
-            {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} napcoAlarm={napcoAlarm} /></>}
+            <ConnectionBar connected={{ interactive: connected.interactive, hik: connected.hik, geovision: gvConnected, napco: !!napcoAlarm?.loggedIn, thermohub: !!thermo?.configured, procare: connected.procare }} onReload={() => { reload(); reloadHub(); loadThermo(); }} />
+            {tab === "home" && <><Verdict v={verdict} /><Home log={log} setTab={setTab} members={members} bookings={bookings} cameras={cameras} gvDoors={gvDoors} napcoAlarm={napcoAlarm} thermo={thermo} /></>}
             {tab === "security" && <Security doors={doors} alarm={alarm} napcoAlarm={napcoAlarm} hub={hub} lockdown={lockdown} role={role} authEnabled={authEnabled} />}
-            {tab === "hvac" && <Hvac zones={zones} hub={hub} />}
+            {tab === "hvac" && <Hvac zones={zones} hub={hub} thermo={thermo} thermoAction={thermoAction} reload={loadThermo} role={role} authEnabled={authEnabled} />}
             {tab === "bookings" && <Bookings bookings={bookings} live={!usingMock.amilia} />}
             {tab === "members" && <Members members={members} live={!usingMock.amilia} />}
             {tab === "cameras" && <Cameras cameras={cameras} snapshotUrl={snapshotUrl} liveEnabled={connected.hik}
@@ -487,7 +510,8 @@ const PROBES = [
   { key: "napco-secsrc", label: "Napco Alarm — Dump Security Page JS", path: "/api/napco/security-src" },
   { key: "napco-keypad", label: "Napco Alarm — Extract Keypad Commands", path: "/api/napco/keypad" },
   { key: "napco-climate", label: "Napco/iBridge — Find Thermostats (Z-Wave)", path: "/api/napco/climate" },
-  { key: "pro1", label: "Pro1 Thermostats", path: "/api/pro1/debug" },
+  { key: "thermohub", label: "ThermoHub Thermostats (ecobee)", path: "/api/thermohub/debug" },
+  { key: "pro1", label: "Pro1 Thermostats (legacy)", path: "/api/pro1/debug" },
   { key: "hik", label: "Hik Cameras", path: "/api/hik/debug" },
   { key: "hik-camera", label: "Hik Camera Test (capture + live)", path: "/api/hik/debug/camera" },
   { key: "interactive", label: "SquareOne Interactive (bookings + members)", path: "/api/interactive/debug/raw" },
@@ -1010,7 +1034,7 @@ function ConnectionBar({ connected, onReload }) {
     ["Cameras", connected.hik],
     ["Doors · GeoVision", connected.geovision],
     ["Alarm · Napco", connected.napco],
-    ["Climate · Pro1", connected.pro1],
+    ["Climate · ThermoHub", connected.thermohub],
     ["ELC · Manual", true],
   ];
   const anyPreview = items.some(([, on]) => !on);
@@ -1077,7 +1101,7 @@ function Stat({ label, value, sub, color = C.text, icon: Icon }) {
 }
 
 /* ------------------------------- HOME ------------------------------- */
-function Home({ log, setTab, members, bookings, cameras, gvDoors, napcoAlarm }) {
+function Home({ log, setTab, members, bookings, cameras, gvDoors, napcoAlarm, thermo }) {
   const camsOnline = cameras.filter((c) => c.online).length;
   const doorList = Array.isArray(gvDoors) ? gvDoors : [];
   return (
@@ -1134,8 +1158,7 @@ function Home({ log, setTab, members, bookings, cameras, gvDoors, napcoAlarm }) 
       </Panel>
 
       <AlarmCard alarm={napcoAlarm} onManage={() => setTab("security")} />
-      <NotConnectedCard title="Climate" system="Pro1 thermostats" icon={Thermometer}
-        blurb="Zone temperatures and setpoints appear here once the Pro1 thermostats are connected." />
+      <ThermostatCard thermo={thermo} onManage={() => setTab("hvac")} />
     </div>
   );
 }
@@ -1368,6 +1391,50 @@ function AlarmCard({ alarm, onManage }) {
   );
 }
 
+// Thermostat helpers shared by the Home card and the Climate tab.
+const fmtTemp = (v) => (v == null || isNaN(Number(v)) ? "—" : `${Math.round(Number(v))}°`);
+const holdLabel = (t) => {
+  if (!t.hold) return t.source === "occupied" ? "on schedule · occupied" : t.source === "recovery" ? "smart recovery" : t.source === "unoccupied" ? "on schedule · after hours" : "no schedule";
+  const who = t.hold.type === "motion" ? "Motion override" : t.hold.type === "local" ? "Changed at thermostat" : "Manual hold";
+  const until = t.hold.until ? ` until ${new Date(t.hold.until).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : " indefinitely";
+  return `${who}${until}`;
+};
+const equipColor = (t) => (t.equipment === "heating" ? C.amber : t.equipment === "cooling" ? C.cyan : C.dim);
+
+// Live ThermoHub thermostat card on Home. Falls back to the "not connected"
+// placeholder until THERMOHUB_TOKEN is set.
+function ThermostatCard({ thermo, onManage }) {
+  if (thermo && thermo.configured === false)
+    return (
+      <NotConnectedCard title="Climate" system="ThermoHub · ecobee" icon={Thermometer}
+        blurb="Live temperatures and holds appear here once ThermoHub issues an integration token (THERMOHUB_TOKEN)." />
+    );
+  const list = thermo?.thermostats || [];
+  const loading = thermo === null;
+  const offline = list.filter((t) => !t.online).length;
+  return (
+    <Panel title="Climate" accent={offline ? C.amber : C.go}
+      right={<button onClick={onManage} style={{ background: "none", border: "none", color: C.cyan, fontSize: 12, cursor: "pointer", fontFamily: mono }}>manage →</button>}>
+      {loading ? (
+        <div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={13} className="spin" /> Reading thermostats…</div>
+      ) : list.length === 0 ? (
+        <Empty text="ThermoHub answered, but no thermostats are visible to this token." />
+      ) : list.slice(0, 5).map((t) => (
+        <div key={t.id} className="flex items-center gap-3" style={{ padding: "7px 0", borderBottom: `1px solid ${C.border}`, fontSize: 13.5 }}>
+          <Thermometer size={14} color={equipColor(t)} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {t.name}{t.online ? "" : <span style={{ color: C.amber, fontFamily: mono, fontSize: 11 }}> · not responding</span>}
+            <div style={{ fontSize: 11.5, color: t.hold ? C.amber : C.dim, fontFamily: mono }}>{holdLabel(t)}</div>
+          </span>
+          <span style={{ fontFamily: mono, fontSize: 18, fontWeight: 700, color: C.text }}>{fmtTemp(t.temp)}</span>
+          <span style={{ fontFamily: mono, fontSize: 11.5, color: C.mid, minWidth: 62, textAlign: "right" }}>{fmtTemp(t.heat)}–{fmtTemp(t.cool)}</span>
+        </div>
+      ))}
+      <div style={{ fontSize: 11, fontFamily: mono, color: C.dim, paddingTop: 6 }}>ThermoHub · ecobee{list.length > 5 ? ` · +${list.length - 5} more` : ""}</div>
+    </Panel>
+  );
+}
+
 // Honest placeholder for a planned-but-not-yet-connected integration.
 function NotConnectedCard({ title, system, icon: Icon, blurb }) {
   return (
@@ -1572,9 +1639,15 @@ function BigBtn({ icon: Icon, label, onClick, color, active, loading }) {
 }
 
 /* ------------------------------- HVAC ------------------------------- */
-function Hvac({ zones, hub }) {
+function Hvac({ zones, hub, thermo, thermoAction, reload, role, authEnabled }) {
+  // Live ThermoHub thermostats take over the tab once a token is set; until
+  // then the Home Assistant preview below stays as the placeholder.
+  if (thermo === null) return <Panel title="Climate"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Reading thermostats…</div></Panel>;
+  if (thermo.configured) return <ThermoHubPanel thermo={thermo} act={thermoAction} reload={reload} role={role} authEnabled={authEnabled} />;
   return (
     <div className="grid gap-3">
+      <NotConnectedCard title="Climate" system="ThermoHub · ecobee" icon={Thermometer}
+        blurb="The thermostats live in ThermoHub. Add THERMOHUB_TOKEN (an integration token issued by ThermoHub) in Vercel and this tab goes live. Below is the sample view." />
       <Panel title="Climate Presets" accent={C.cyan}>
         <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))" }}>
           <Preset icon={Sun} label="Morning" onClick={() => hub.applyPreset("Morning")} />
@@ -1609,6 +1682,114 @@ function Hvac({ zones, hub }) {
     </div>
   );
 }
+// Live thermostats from ThermoHub, one panel each, with the same controls as
+// ThermoHub's own page: mode, a temporary hold (heat/cool pair + duration) and
+// resume schedule. Controls are managers/admins only (also enforced server-side).
+function ThermoHubPanel({ thermo, act, reload, role, authEnabled }) {
+  const canCtl = !authEnabled || role === "admin" || role === "manager";
+  const list = thermo.thermostats || [];
+  const anyHold = list.some((t) => t.hold);
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center gap-3 flex-wrap" style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, padding: "0 2px" }}>
+        <span style={{ flex: 1, minWidth: 240 }}>
+          Thermostats are managed in <strong>ThermoHub</strong>, which owns the weekly schedule profiles, motion overrides and
+          smart recovery. From here you can place a <strong>temporary hold</strong> or put a thermostat back on its schedule;
+          bookings do the same automatically (see <strong>Automation</strong>).
+          {!canCtl && <span style={{ color: C.amber }}> View only — managers &amp; admins can change settings.</span>}
+        </span>
+        <span style={{ fontSize: 11, fontFamily: mono, color: anyHold ? C.amber : C.go }}>{list.length} thermostat{list.length === 1 ? "" : "s"}{anyHold ? " · hold active" : ""}</span>
+        <button onClick={reload} className="so-btn flex items-center gap-1.5" style={{ padding: "4px 10px", borderRadius: 6, fontSize: 12, fontFamily: mono, color: C.cyan }}><RefreshCw size={12} /> refresh</button>
+      </div>
+      {list.length === 0 && <Empty text="ThermoHub answered, but no thermostats are visible to this token. Check THERMOHUB_BUILDING or the token's business." />}
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))" }}>
+        {list.map((t) => <ThermostatPanel key={t.id} t={t} act={act} canCtl={canCtl} />)}
+      </div>
+    </div>
+  );
+}
+
+function HoldStepper({ label, val, set, disabled }) {
+  const step = (d) => set(Math.max(45, Math.min(95, Number(val) + d)));
+  return (
+    <div className="flex items-center gap-1.5">
+      <span style={{ fontSize: 11, color: C.dim, fontFamily: mono, minWidth: 54 }}>{label}</span>
+      <button className="so-btn" disabled={disabled} onClick={() => step(-1)} style={{ padding: "4px 8px", borderRadius: 6 }}>−</button>
+      <span style={{ fontFamily: mono, fontSize: 18, fontWeight: 700, minWidth: 34, textAlign: "center" }}>{val}°</span>
+      <button className="so-btn" disabled={disabled} onClick={() => step(1)} style={{ padding: "4px 8px", borderRadius: 6 }}>+</button>
+    </div>
+  );
+}
+
+function ThermostatPanel({ t, act, canCtl }) {
+  const [heat, setHeat] = useState(Math.round(t.heat ?? 70));
+  const [cool, setCool] = useState(Math.round(t.cool ?? 74));
+  const [minutes, setMinutes] = useState("120");
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  // Follow the live target when it changes under us (a booking hold, someone at the thermostat).
+  useEffect(() => { if (t.heat != null) setHeat(Math.round(t.heat)); if (t.cool != null) setCool(Math.round(t.cool)); }, [t.heat, t.cool]);
+  const run = async (key, fn) => {
+    setBusy(key); setErr(null);
+    try { await fn(); } catch (e) { setErr(e.message); } finally { setBusy(null); }
+  };
+  const accent = !t.online ? C.amber : t.hold ? C.amber : C.go;
+  return (
+    <Panel title={t.name} accent={accent}
+      right={<span style={{ fontSize: 11, fontFamily: mono, color: t.online ? C.go : C.amber }}>{t.online ? (t.building || "online") : t.hubOnline ? "not responding" : "hub offline"}</span>}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div style={{ fontSize: 44, fontWeight: 800, fontFamily: mono, letterSpacing: -1, lineHeight: 1 }}>{fmtTemp(t.temp)}</div>
+          <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, marginTop: 4 }}>TARGET {fmtTemp(t.heat)} – {fmtTemp(t.cool)}</div>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: mono, fontSize: 12.5 }}>
+          <div className="flex items-center gap-1.5 justify-end" style={{ color: equipColor(t), textTransform: "capitalize" }}><Thermometer size={13} />{t.equipment || "idle"}</div>
+          <div className="flex items-center gap-1.5 justify-end" style={{ color: C.mid }}><Droplets size={13} />{t.humidity == null ? "—" : `${t.humidity}%`}</div>
+          <div className="flex items-center gap-1.5 justify-end" style={{ color: t.occupied ? C.cyan : C.dim }}><Activity size={13} />{t.occupied ? "motion" : "no motion"}</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 12, fontFamily: mono, color: t.hold ? C.amber : C.mid }}>
+        {holdLabel(t)}{t.schedule ? <span style={{ color: C.dim }}> · profile {t.schedule.name}</span> : ""}
+      </div>
+      {t.alert && <div style={{ marginTop: 6, fontSize: 12, color: C.red }}>{t.alert}</div>}
+
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, marginBottom: 6 }}>MODE</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {["heat", "cool", "auto", "off"].map((m) => (
+            <button key={m} className="so-btn" disabled={!canCtl || busy} onClick={() => run(`mode-${m}`, () => act(t.id, "mode", { mode: m }, `${t.name}: mode ${m}`))}
+              style={{ padding: "5px 12px", borderRadius: 6, fontSize: 12.5, textTransform: "capitalize", border: `1px solid ${t.mode === m ? C.cyan : C.border}`, color: t.mode === m ? C.cyan : C.mid, fontWeight: t.mode === m ? 700 : 400 }}>
+              {busy === `mode-${m}` ? "…" : m}
+            </button>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: C.dim, fontFamily: mono, margin: "12px 0 6px" }}>TEMPORARY HOLD</div>
+        <div className="flex items-center gap-4 flex-wrap">
+          <HoldStepper label="HEAT TO" val={heat} set={setHeat} disabled={!canCtl} />
+          <HoldStepper label="COOL TO" val={cool} set={setCool} disabled={!canCtl} />
+        </div>
+        <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: 10 }}>
+          <select value={minutes} disabled={!canCtl} onChange={(e) => setMinutes(e.target.value)} style={{ ...inputStyle, padding: "6px 8px" }}>
+            <option value="60">1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option>
+            <option value="480">8 hours</option><option value="indefinite">Indefinitely</option>
+          </select>
+          <button className="so-btn" disabled={!canCtl || busy} onClick={() => run("hold", () => act(t.id, "hold", { heat, cool, minutes: minutes === "indefinite" ? "indefinite" : Number(minutes) }, `${t.name}: hold ${heat}°–${cool}°`))}
+            style={{ padding: "6px 14px", borderRadius: 6, fontSize: 13, fontWeight: 600, color: C.cyan }}>
+            {busy === "hold" ? "Applying…" : "Apply hold"}
+          </button>
+          {t.hold && (
+            <button className="so-btn" disabled={!canCtl || busy} onClick={() => run("resume", () => act(t.id, "resume", {}, `${t.name}: back on schedule`))}
+              style={{ padding: "6px 14px", borderRadius: 6, fontSize: 13 }}>
+              {busy === "resume" ? "Resuming…" : "Resume schedule"}
+            </button>
+          )}
+        </div>
+        {err && <div style={{ marginTop: 8, fontSize: 12, color: C.red }}>{err}</div>}
+      </div>
+    </Panel>
+  );
+}
+
 function Preset({ icon: Icon, label, onClick }) {
   return (
     <button onClick={onClick} className="so-btn flex items-center justify-center gap-2" style={{ padding: "14px", borderRadius: 8 }}>
@@ -1688,8 +1869,13 @@ function BookingAutomation() {
   const t = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const day = (ms) => new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
   const liveTag = (
-    <span style={{ fontSize: 11, fontFamily: mono, color: sched.hubLive ? C.go : C.amber }}>
-      {sched.hubLive ? "AUTO · Home Assistant" : "PLANNED · goes live with Home Assistant"}
+    <span style={{ fontSize: 11, fontFamily: mono, color: sched.geovisionLive ? C.go : C.amber }}>
+      {sched.geovisionLive ? "AUTO · GeoVision" : "PLANNED · goes live with GeoVision"}
+    </span>
+  );
+  const climateTag = (
+    <span style={{ fontSize: 11, fontFamily: mono, color: sched.thermohubLive ? C.go : C.amber }}>
+      {sched.thermohubLive ? "AUTO · ThermoHub" : "PLANNED · goes live with ThermoHub"}
     </span>
   );
   const Row = ({ from, to, room, sub, activity, chip: c, k }) => (
@@ -1713,8 +1899,8 @@ function BookingAutomation() {
     w.status === "done" ? { text: "done", color: C.dim } :
     { text: "scheduled", color: C.cyan };
   const climChip = (w) =>
-    !w.zoneId ? { text: "no zone mapped", color: C.amber } :
-    w.status === "conditioning" ? { text: "CONDITIONING", color: C.go } :
+    !w.thermostatId ? { text: "no thermostat mapped", color: C.amber } :
+    w.status === "conditioning" ? { text: "HOLDING", color: C.go } :
     w.status === "done" ? { text: "done", color: C.dim } :
     { text: "scheduled", color: C.cyan };
   return (
@@ -1731,14 +1917,14 @@ function BookingAutomation() {
         </Panel>
       )}
       {sched.climate?.windows?.length > 0 && (
-        <Panel title="Climate Schedule" accent={C.amber} right={liveTag}>
+        <Panel title="Climate Schedule" accent={C.amber} right={climateTag}>
           <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, paddingBottom: 8 }}>
-            {sched.climate.eventTemp}° from {sched.climate.preMin} min before · back to {sched.climate.idleTemp}° {sched.climate.postMin} min after
-            {" · overlapping events hold the event setpoint"}
+            hold {sched.climate.heat}°–{sched.climate.cool}° from {sched.climate.preMin} min before · back on schedule {sched.climate.postMin} min after
+            {" · overlapping events extend the hold"}
           </div>
           {sched.climate.windows.map((w) => (
             <Row key={`c-${w.id}`} k={`c-${w.id}`} from={w.preAt} to={w.postAt} room={w.room}
-              sub={w.zoneName ? `${w.zoneName} zone · ${w.eventTemp}°→${w.idleTemp}°` : ""} activity={w.activity} chip={climChip(w)} />
+              sub={w.thermostatName ? `${w.thermostatName} · ${w.heat}°–${w.cool}°` : ""} activity={w.activity} chip={climChip(w)} />
           ))}
         </Panel>
       )}
@@ -2204,6 +2390,12 @@ function Automation({ role, authEnabled }) {
     setData((d) => ({ ...d, memberDoor: value }));
     save({ memberDoor: value });
   };
+  const setThermostat = (roomId, value) => {
+    const climateMap = { ...(data.climateMap || {}) };
+    if (value) climateMap[roomId] = value; else delete climateMap[roomId];
+    setData((d) => ({ ...d, climateMap }));
+    save({ climateMap });
+  };
 
   if (!data) return <Panel title="Booking Automation"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Loading…</div></Panel>;
 
@@ -2213,6 +2405,19 @@ function Automation({ role, authEnabled }) {
   const selStyle = { ...inputStyle, padding: "6px 8px", cursor: canEdit ? "pointer" : "default", minWidth: 200, maxWidth: 260 };
   const upcoming = (sched?.windows || []).filter((w) => w.doorKey && w.status !== "done").slice(0, 8);
   const mappedCount = Object.keys(data.map || {}).length;
+  const thermostats = data.thermostats || [];
+  const climateCount = Object.keys(data.climateMap || {}).length;
+  const thermoOptions = [<option key="" value="">— no thermostat (skip) —</option>, ...thermostats.map((t) => <option key={t.id} value={t.id}>{t.name}{t.building ? ` · ${t.building}` : ""}</option>)];
+  const climateRows = data.rooms.map((room) => (
+    <div key={`t-${room.id}`} className="flex items-center justify-between gap-3" style={{ padding: "9px 0", borderBottom: `1px solid ${C.border}`, opacity: room.active === false ? 0.6 : 1 }}>
+      <span className="flex items-center gap-2" style={{ fontSize: 14, minWidth: 0 }}>
+        <span style={{ width: 10, height: 10, borderRadius: 3, background: room.color || C.cyan, flexShrink: 0 }} />
+        <span>{room.name}</span>
+        {room.active === false && <span style={{ fontSize: 11, fontFamily: mono, color: C.amber }}>inactive in Interactive</span>}
+      </span>
+      <select value={(data.climateMap || {})[room.id] || ""} disabled={!canEdit} onChange={(e) => setThermostat(room.id, e.target.value)} style={selStyle}>{thermoOptions}</select>
+    </div>
+  ));
 
   return (
     <div className="grid gap-3">
@@ -2252,6 +2457,21 @@ function Automation({ role, authEnabled }) {
                 <select value={(data.map || {})[room.id] || ""} disabled={!canEdit} onChange={(e) => setDoor(room.id, e.target.value)} style={selStyle}>{doorOptions}</select>
               </div>
             ))}
+      </Panel>
+
+      <Panel title="Room → Thermostat mapping" accent={C.amber}
+        right={<span style={{ fontSize: 11, fontFamily: mono, color: data.thermohubLive ? (climateCount ? C.go : C.dim) : C.amber }}>
+          {data.thermohubLive ? `${climateCount} mapped` : "ThermoHub not connected"}</span>}>
+        <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, marginBottom: 8 }}>
+          Each mapped room gets a <strong>ThermoHub hold at {data.climateHeat}°–{data.climateCool}°</strong> from <strong>{data.climatePreMin} min before</strong> a
+          booking until <strong>{data.climatePostMin} min after</strong>, then goes back on its normal schedule. Holds people set by hand are left alone.
+          {!data.thermohubLive && <span style={{ color: C.amber }}> Dry-run until THERMOHUB_TOKEN is set in Vercel.</span>}
+        </div>
+        {!data.thermohubLive
+          ? null
+          : thermostats.length === 0
+            ? <Empty text="ThermoHub answered, but no thermostats are visible — check Settings → Diagnostics → ThermoHub." />
+            : data.rooms.length === 0 ? <Empty text="No rooms found in SquareOne Interactive yet." /> : climateRows}
       </Panel>
 
       <Panel title="Upcoming today" accent={C.dim}>

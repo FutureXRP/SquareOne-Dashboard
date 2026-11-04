@@ -227,13 +227,33 @@ export const config = {
   climate: {
     preMin: Number(process.env.CLIMATE_PRE_LEAD_MIN || 60),   // condition N min before start
     postMin: Number(process.env.CLIMATE_POST_LAG_MIN || 60),  // set back N min after end
-    eventTemp: Number(process.env.CLIMATE_EVENT_TEMP || 71),  // occupied setpoint (°F)
-    idleTemp: Number(process.env.CLIMATE_IDLE_TEMP || 78),    // setback setpoint (°F)
+    eventTemp: Number(process.env.CLIMATE_EVENT_TEMP || 71),  // occupied setpoint (°F) — legacy HA path
+    idleTemp: Number(process.env.CLIMATE_IDLE_TEMP || 78),    // setback setpoint (°F) — legacy HA path
+    // ThermoHub holds are a heat/cool pair (the thermostat heats below `heat`,
+    // cools above `cool`). Used for the booking hold on every mapped room.
+    eventHeat: Number(process.env.CLIMATE_EVENT_HEAT || 70),
+    eventCool: Number(process.env.CLIMATE_EVENT_COOL || 74),
     // Explicit room -> zone mapping, JSON: {"Gym/Auditorium": "fit"} (values are
     // zone ids from HA_ENTITIES). Unmapped rooms fall back to fuzzy name match.
     map: parseJsonEnv("CLIMATE_BOOKING_MAP") || {},
     // Per-zone setpoint overrides, JSON: {"fit": {"event": 68, "idle": 78}}
     setpoints: parseJsonEnv("CLIMATE_SETPOINTS") || {},
+  },
+
+  // ThermoHub — the thermostat service (thermohub-web.thermohub-api.workers.dev).
+  // Its hub is a Home Assistant box on the on-site admin PC that drives the
+  // ecobee thermostats and owns the schedules / holds / motion rules; we talk to
+  // ThermoHub's cloud API, never to the thermostats directly, so its hub never
+  // fights our changes. The web app signs in with Microsoft; a server can't, so
+  // ThermoHub must issue an integration token that it accepts as a bearer.
+  // Keep it in Vercel env vars only.
+  thermohub: {
+    apiUrl: (process.env.THERMOHUB_API_URL || "https://thermohub-api.thermohub-api.workers.dev").replace(/\/+$/, ""),
+    token: process.env.THERMOHUB_TOKEN || "",
+    // Optional: only show/control thermostats in this ThermoHub building
+    // (name or id). Blank = every thermostat the token can see.
+    building: process.env.THERMOHUB_BUILDING || "",
+    get configured() { return Boolean(this.token); },
   },
 
   // The on-site hub: Home Assistant adapts the LAN devices (Gemini alarm,
