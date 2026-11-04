@@ -6,7 +6,7 @@ import { fetchThermostats, thHold, thResume, thermohubConfigured } from "./therm
 import { checkNewMembers } from "./memberAlerts.js";
 import { gvDoorOp, gvDoorTree, GV_DOOR_OPS } from "./buildingClouds.js";
 import { memberDoorSetting } from "./memberDoor.js";
-import { getCachedToken, setCachedToken } from "../tokenStore.js";
+import { getCachedToken, setCachedToken, listCachedTokens } from "../tokenStore.js";
 
 export const doorsRouter = Router();
 
@@ -41,10 +41,11 @@ export const doorsRouter = Router();
       preAt  = start − CLIMATE_PRE_LEAD_MIN
       postAt = end   + CLIMATE_POST_LAG_MIN
 
-  GET  /api/doors/schedule      (signed-in) — today's computed windows.
+  GET  /api/doors/schedule      (signed-in) — today's computed windows + last tick.
   GET  /api/doors/booking-map   (signed-in) — rooms + doors + thermostats + mappings.
   PUT  /api/doors/booking-map   (manager)   — save mappings / member door.
   POST /api/doors/run           (cron)      — the reconciler tick.
+  POST /api/doors/heartbeat     (signed-in) — same tick, fired by open dashboards (gated ~90s).
 */
 
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -144,8 +145,13 @@ async function gvForce(ctrl, door, opKey) {
 // so dry runs never fake it.
 const DOOR_STATE = "door-state";
 const STATE_TTL = 30 * 86400000;
-async function reconcileDoors(windows, live, req, actions, now) {
-  const keys = [...new Set(windows.map((w) => w.doorKey).filter(Boolean))];
+// Exported for tests only.
+export async function reconcileDoors(windows, live, req, actions, now, gvDoors) {
+  // Every door a current window names, PLUS every door we still hold open —
+  // a booking cancelled (or unmapped) mid-window no longer has a window, and
+  // without this the door would stay held open until the next booking ended.
+  const held = (await listCachedTokens(DOOR_STATE)).filter((s) => s.token === "open").map((s) => s.scope);
+  const keys = [...new Set([...windows.map((w) => w.doorKey).filter(Boolean), ...held])];
   for (const key of keys) {
     const mine = windows.filter((w) => w.doorKey === key);
     const covering = mine.filter((w) => w.unlockAt <= now && now < w.relockAt);
@@ -153,8 +159,13 @@ async function reconcileDoors(windows, live, req, actions, now) {
     const last = (await getCachedToken(DOOR_STATE, key))?.token || "closed";
     if (wantOpen === (last === "open")) continue;
     // Attribute the action to the booking that drives it: the current window
-    // when opening, the most recently ended one when releasing.
-    const w = covering[0] || mine.filter((x) => x.relockAt <= now).sort((a, b) => b.relockAt - a.relockAt)[0] || mine[0];
+    // when opening, the most recently ended one when releasing. A held door
+    // with no window at all (cancelled booking) is released on its own.
+    const w = covering[0] || mine.filter((x) => x.relockAt <= now).sort((a, b) => b.relockAt - a.relockAt)[0] || mine[0] || (() => {
+      const [ctrl, door] = key.split(":").map(Number);
+      const gv = (gvDoors || []).find((d) => d.ctrl === ctrl && d.door === door);
+      return { id: null, ctrl, door, doorName: gv?.name || `Door ${key}`, room: "", activity: "booking cancelled or unmapped" };
+    })();
     let executed = false, error = null;
     if (live) {
       try { await gvForce(w.ctrl, w.door, wantOpen ? "force-unlock" : "release"); executed = true; }
@@ -173,8 +184,11 @@ async function reconcileDoors(windows, live, req, actions, now) {
 // pushes the end out; a person's own hold is never touched because we only
 // resume when OUR hold is the one on record.
 const CLIMATE_STATE = "climate-state";
-async function reconcileClimate(windows, live, req, actions, now) {
-  const ids = [...new Set(windows.map((w) => w.thermostatId).filter(Boolean))];
+// Exported for tests only.
+export async function reconcileClimate(windows, live, req, actions, now, thermostats) {
+  // Current windows' thermostats plus any we still hold (cancelled booking).
+  const held = (await listCachedTokens(CLIMATE_STATE)).filter((s) => s.token === "hold").map((s) => s.scope);
+  const ids = [...new Set([...windows.map((w) => w.thermostatId).filter(Boolean), ...held])];
   for (const id of ids) {
     const mine = windows.filter((w) => w.thermostatId === id);
     const covering = mine.filter((w) => w.preAt <= now && now < w.postAt);
@@ -184,7 +198,8 @@ async function reconcileClimate(windows, live, req, actions, now) {
     const holding = last?.token === "hold";
     const heldUntil = Number(last?.meta?.until) || 0;
     if (wantHold === holding && (!wantHold || Math.abs(heldUntil - until) < 60000)) continue;
-    const w = covering[0] || mine.filter((x) => x.postAt <= now).sort((a, b) => b.postAt - a.postAt)[0] || mine[0];
+    const w = covering[0] || mine.filter((x) => x.postAt <= now).sort((a, b) => b.postAt - a.postAt)[0] || mine[0]
+      || { id: null, thermostatName: (thermostats || []).find((t) => t.id === id)?.name || `Thermostat ${id}`, room: "", activity: "booking cancelled or unmapped" };
     let executed = false, error = null;
     if (live) {
       try {
@@ -218,6 +233,8 @@ doorsRouter.get(
       lagMin: config.doors.lagMin,
       geovisionLive: config.geovision.configured,
       thermohubLive: thermohubConfigured(),
+      cronConfigured: Boolean(config.doors.cronSecret),
+      lastTick: await lastTick(),
       windows: doorWindows(spans, map, gvDoors),
       climate: {
         preMin: config.climate.preMin, postMin: config.climate.postMin,
@@ -298,24 +315,44 @@ function cronAuth(req, res, next) {
 }
 
 // The reconciler tick. Doors → GeoVision; climate → ThermoHub. Both are
-// state-based (see headers), so a sparse or late cron still converges.
-doorsRouter.all(
-  "/run",
-  cronAuth,
-  guard("interactive", async (req) => {
-    const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
-    const now = Date.now();
-    const actions = [];
+// state-based (see headers), so a sparse or late tick still converges.
+// `source` records who fired it ('cron' | 'dashboard') for the status line.
+const TICK_KEY = "door-tick", TICK_GATE_TTL = 150_000; // kv skew 60s → ~90s between dashboard ticks
+async function runTick(req, source) {
+  const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
+  const now = Date.now();
+  const actions = [];
 
-    await reconcileDoors(doorWindows(spans, map, gvDoors), config.geovision.configured, req, actions, now);
-    await reconcileClimate(climateWindows(spans, cmap, thermostats), thermohubConfigured(), req, actions, now);
+  await reconcileDoors(doorWindows(spans, map, gvDoors), config.geovision.configured, req, actions, now, gvDoors);
+  await reconcileClimate(climateWindows(spans, cmap, thermostats), thermohubConfigured(), req, actions, now, thermostats);
 
-    // Same tick also watches for new members — never fails the tick.
-    const memberAlerts = await checkNewMembers(req);
+  // Same tick also watches for new members — never fails the tick.
+  const memberAlerts = await checkNewMembers(req);
 
-    return {
-      at: new Date(now).toISOString(), geovisionLive: config.geovision.configured, thermohubLive: thermohubConfigured(),
-      spanCount: spans.length, actions, memberAlerts,
-    };
-  })
-);
+  const result = {
+    at: new Date(now).toISOString(), source, geovisionLive: config.geovision.configured, thermohubLive: thermohubConfigured(),
+    spanCount: spans.length, actions, memberAlerts,
+  };
+  await setCachedToken(TICK_KEY, "last", source, { at: result.at, actions: actions.length, errors: actions.filter((a) => a.error).length }, now + STATE_TTL).catch(() => {});
+  return result;
+}
+// When the scheduler last actually ran (for the Automation status line).
+async function lastTick() {
+  const t = await getCachedToken(TICK_KEY, "last").catch(() => null);
+  return t ? { at: t.meta?.at || null, source: t.token, actions: t.meta?.actions ?? 0, errors: t.meta?.errors ?? 0 } : null;
+}
+
+doorsRouter.all("/run", cronAuth, guard("interactive", (req) => runTick(req, "cron")));
+
+// Dashboard heartbeat: any open dashboard tab calls this every couple of
+// minutes, so the schedule runs even when no external cron is reaching us
+// (GitHub's schedule has proven to fire hours apart). Gated in the kv so N
+// tabs still mean one tick per ~90s. Signed-in users only; they can't pass
+// parameters, so there's nothing to abuse beyond "run the schedule now".
+doorsRouter.post("/heartbeat", requireAuth, guard("interactive", async (req) => {
+  const gate = await getCachedToken(TICK_KEY, "gate");
+  if (gate) return { ran: false, lastTick: await lastTick() };
+  await setCachedToken(TICK_KEY, "gate", "1", {}, Date.now() + TICK_GATE_TTL);
+  const r = await runTick(req, "dashboard");
+  return { ran: true, lastTick: { at: r.at, source: "dashboard", actions: r.actions.length, errors: r.actions.filter((a) => a.error).length }, actions: r.actions };
+}));

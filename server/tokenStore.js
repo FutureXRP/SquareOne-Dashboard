@@ -29,6 +29,27 @@ export async function getCachedToken(provider, scope = "default") {
   return null;
 }
 
+// Every live entry for a provider, as { scope, token, meta }. Used by the
+// booking scheduler to find doors/thermostats it still holds, even when no
+// current booking refers to them any more (cancelled mid-window).
+export async function listCachedTokens(provider) {
+  const now = Date.now() + SKEW;
+  if (authEnabled) {
+    const { data } = await supabaseAdmin
+      .from("token_cache")
+      .select("scope, token, meta, expires_at")
+      .eq("provider", provider);
+    return (data || [])
+      .filter((r) => new Date(r.expires_at).getTime() > now)
+      .map((r) => ({ scope: r.scope, token: r.token, meta: r.meta || {} }));
+  }
+  const out = [];
+  for (const [k, m] of mem) {
+    if (k.startsWith(`${provider}:`) && m.expiresAt > now) out.push({ scope: k.slice(provider.length + 1), token: m.token, meta: m.meta });
+  }
+  return out;
+}
+
 export async function setCachedToken(provider, scope, token, meta, expiresAtMs) {
   if (authEnabled) {
     await supabaseAdmin.from("token_cache").upsert({
