@@ -32,6 +32,11 @@ export const doorsRouter = Router();
   by Interactive facility id like "gym" → "ctrl:door"). Unmapped rooms do nothing.
   The member "Unlock door" button uses a separate door: app_settings 'member_door'.
 
+  Both subsystems sit behind master switches (app_settings 'automation':
+  { doors, climate }, default OFF) set from the Automation tab. Off = the
+  schedule is still computed and shown, but nothing touches a device, and
+  anything already held is released.
+
   Climate works the same way through ThermoHub (app_settings 'climate_booking_map',
   facility id → ThermoHub thermostat id): inside a window the thermostat gets a
   ThermoHub HOLD at the event setpoints (CLIMATE_EVENT_HEAT/COOL) that expires at
@@ -72,6 +77,19 @@ function resolveDoor(span, map, gvDoors) {
   if (!Number.isFinite(ctrl) || !Number.isFinite(door)) return null;
   const gv = (gvDoors || []).find((d) => d.ctrl === ctrl && d.door === door);
   return { ctrl, door, name: gv?.name || `Door ${ctrl}:${door}` };
+}
+
+// --- Master switches (app_settings 'automation': { doors, climate }) ----------
+// Both default OFF: nothing acts on a real device until a manager turns it on.
+// Turning one off also releases whatever it's holding (see runTick).
+async function getAutomation() {
+  const def = { doors: false, climate: false };
+  if (!supabaseAdmin) return def;
+  try {
+    const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "automation").maybeSingle();
+    const v = data?.value && typeof data.value === "object" ? data.value : {};
+    return { doors: v.doors === true, climate: v.climate === true };
+  } catch { return def; }
 }
 
 // --- Room → thermostat mapping (admin-managed, ThermoHub ids) ------------------
@@ -220,6 +238,7 @@ export async function reconcileClimate(windows, live, req, actions, now, thermos
 const loadAll = () => Promise.all([
   fetchSpans(), getBookingMap(), gvDoorTree().catch(() => []),
   getClimateMap(), thermohubConfigured() ? fetchThermostats().catch(() => []) : Promise.resolve([]),
+  getAutomation(),
 ]);
 
 // Today's windows for the Bookings/Automation UI.
@@ -227,12 +246,13 @@ doorsRouter.get(
   "/schedule",
   requireAuth,
   guard("interactive", async () => {
-    const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
+    const [spans, map, gvDoors, cmap, thermostats, automation] = await loadAll();
     return {
       leadMin: config.doors.leadMin,
       lagMin: config.doors.lagMin,
       geovisionLive: config.geovision.configured,
       thermohubLive: thermohubConfigured(),
+      automation,
       cronConfigured: Boolean(config.doors.cronSecret),
       lastTick: await lastTick(),
       windows: doorWindows(spans, map, gvDoors),
@@ -250,9 +270,10 @@ doorsRouter.get(
   "/booking-map",
   requireAuth,
   guard("interactive", async () => {
-    const [rooms, doors, map, memberDoor, climateMap, thermostats] = await Promise.all([
+    const [rooms, doors, map, memberDoor, climateMap, thermostats, automation] = await Promise.all([
       fetchFacilities(true), gvDoorTree().catch(() => []), getBookingMap(), memberDoorSetting(),
       getClimateMap(), thermohubConfigured() ? fetchThermostats().catch(() => []) : Promise.resolve([]),
+      getAutomation(),
     ]);
     return {
       // Inactive rooms are included (flagged) so they can be pre-mapped; the
@@ -260,7 +281,7 @@ doorsRouter.get(
       rooms: rooms.map((r) => ({ id: r.id, name: r.name, color: r.color, active: r.active, setupMin: r.setupMin, cleanupMin: r.cleanupMin })),
       doors: doors || [], map, memberDoor,
       thermostats: (thermostats || []).map((t) => ({ id: t.id, name: t.name, building: t.building, online: t.online })),
-      climateMap,
+      climateMap, automation,
       leadMin: config.doors.leadMin, lagMin: config.doors.lagMin, geovisionLive: config.geovision.configured,
       climatePreMin: config.climate.preMin, climatePostMin: config.climate.postMin,
       climateHeat: config.climate.eventHeat, climateCool: config.climate.eventCool, thermohubLive: thermohubConfigured(),
@@ -301,6 +322,21 @@ doorsRouter.put(
       logAudit(req, "climate.booking-map", null, { rooms: Object.keys(clean).length });
       out.climateMap = clean;
     }
+    if (req.body && typeof req.body.automation === "object") {
+      const cur = await getAutomation();
+      const next = {
+        doors: "doors" in req.body.automation ? req.body.automation.doors === true : cur.doors,
+        climate: "climate" in req.body.automation ? req.body.automation.climate === true : cur.climate,
+      };
+      await supabaseAdmin.from("app_settings").upsert({ key: "automation", value: next, updated_at: stamp }, { onConflict: "key" });
+      logAudit(req, "automation.switch", null, next);
+      out.automation = next;
+      // Pausing releases anything the schedule is holding right away, rather
+      // than leaving a door open / a hold in place until the next tick.
+      if ((cur.doors && !next.doors) || (cur.climate && !next.climate)) {
+        try { out.released = (await runTick(req, "switch")).actions; } catch { /* next tick will catch it */ }
+      }
+    }
     return out;
   })
 );
@@ -319,18 +355,20 @@ function cronAuth(req, res, next) {
 // `source` records who fired it ('cron' | 'dashboard') for the status line.
 const TICK_KEY = "door-tick", TICK_GATE_TTL = 150_000; // kv skew 60s → ~90s between dashboard ticks
 async function runTick(req, source) {
-  const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
+  const [spans, map, gvDoors, cmap, thermostats, automation] = await loadAll();
   const now = Date.now();
   const actions = [];
 
-  await reconcileDoors(doorWindows(spans, map, gvDoors), config.geovision.configured, req, actions, now, gvDoors);
-  await reconcileClimate(climateWindows(spans, cmap, thermostats), thermohubConfigured(), req, actions, now, thermostats);
+  // A switched-off subsystem is reconciled against NO windows: nothing new is
+  // opened/held, and anything we still hold from before is released.
+  await reconcileDoors(automation.doors ? doorWindows(spans, map, gvDoors) : [], config.geovision.configured, req, actions, now, gvDoors);
+  await reconcileClimate(automation.climate ? climateWindows(spans, cmap, thermostats) : [], thermohubConfigured(), req, actions, now, thermostats);
 
   // Same tick also watches for new members — never fails the tick.
   const memberAlerts = await checkNewMembers(req);
 
   const result = {
-    at: new Date(now).toISOString(), source, geovisionLive: config.geovision.configured, thermohubLive: thermohubConfigured(),
+    at: new Date(now).toISOString(), source, automation, geovisionLive: config.geovision.configured, thermohubLive: thermohubConfigured(),
     spanCount: spans.length, actions, memberAlerts,
   };
   await setCachedToken(TICK_KEY, "last", source, { at: result.at, actions: actions.length, errors: actions.filter((a) => a.error).length }, now + STATE_TTL).catch(() => {});

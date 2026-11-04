@@ -1888,14 +1888,15 @@ function BookingAutomation() {
   if (!sched) return null;
   const t = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const day = (ms) => new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  const auto = sched.automation || {};
   const liveTag = (
-    <span style={{ fontSize: 11, fontFamily: mono, color: sched.geovisionLive ? C.go : C.amber }}>
-      {sched.geovisionLive ? "AUTO · GeoVision" : "PLANNED · goes live with GeoVision"}
+    <span style={{ fontSize: 11, fontFamily: mono, color: auto.doors && sched.geovisionLive ? C.go : C.amber }}>
+      {!auto.doors ? "PAUSED · switch on in Automation" : sched.geovisionLive ? "AUTO · GeoVision" : "PLANNED · goes live with GeoVision"}
     </span>
   );
   const climateTag = (
-    <span style={{ fontSize: 11, fontFamily: mono, color: sched.thermohubLive ? C.go : C.amber }}>
-      {sched.thermohubLive ? "AUTO · ThermoHub" : "PLANNED · goes live with ThermoHub"}
+    <span style={{ fontSize: 11, fontFamily: mono, color: auto.climate && sched.thermohubLive ? C.go : C.amber }}>
+      {!auto.climate ? "PAUSED · switch on in Automation" : sched.thermohubLive ? "AUTO · ThermoHub" : "PLANNED · goes live with ThermoHub"}
     </span>
   );
   const Row = ({ from, to, room, sub, activity, chip: c, k }) => (
@@ -2416,6 +2417,12 @@ function Automation({ role, authEnabled }) {
     setData((d) => ({ ...d, climateMap }));
     save({ climateMap });
   };
+  const setSwitch = async (key, on) => {
+    const automation = { ...(data.automation || {}), [key]: on };
+    setData((d) => ({ ...d, automation }));
+    await save({ automation: { [key]: on } });
+    load(); // picks up the released doors/holds + new status line
+  };
 
   if (!data) return <Panel title="Booking Automation"><div className="flex items-center gap-2" style={{ color: C.mid, fontSize: 13, padding: "6px 0" }}><Loader2 size={14} className="spin" /> Loading…</div></Panel>;
 
@@ -2443,14 +2450,46 @@ function Automation({ role, authEnabled }) {
   const tickAgeMin = tick?.at ? Math.round((Date.now() - new Date(tick.at).getTime()) / 60000) : null;
   const tickStale = tickAgeMin == null || tickAgeMin > 15;
   const ago = tickAgeMin == null ? "never" : tickAgeMin < 1 ? "just now" : tickAgeMin < 60 ? `${tickAgeMin} min ago` : tickAgeMin < 1440 ? `${Math.round(tickAgeMin / 60)} h ago` : `${Math.round(tickAgeMin / 1440)} d ago`;
+  const auto = data.automation || { doors: false, climate: false };
+  const anyOn = auto.doors || auto.climate;
+  const Switch = ({ on, onChange, disabled }) => (
+    <button onClick={() => !disabled && onChange(!on)} disabled={disabled} aria-pressed={on}
+      style={{ width: 46, height: 26, borderRadius: 13, border: `1px solid ${on ? C.go : C.border}`, background: on ? C.go : C.panel2, position: "relative", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1, flexShrink: 0 }}>
+      <span style={{ position: "absolute", top: 3, left: on ? 23 : 3, width: 18, height: 18, borderRadius: 9, background: "#fff", transition: "left .15s" }} />
+    </button>
+  );
 
   return (
     <div className="grid gap-3">
+      <Panel title="Booking automation" accent={anyOn ? C.go : C.amber}
+        right={<span style={{ fontSize: 11, fontFamily: mono, color: anyOn ? C.go : C.amber }}>{anyOn ? "ON" : "PAUSED"}</span>}>
+        <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, marginBottom: 10 }}>
+          Master switches. While a switch is <strong>off</strong>, the schedule below is still computed and shown, but nothing touches a real
+          device, and anything it was holding is released right away. Turn each on when you're ready to go live.
+          {!canEdit && <span style={{ color: C.amber }}> Managers &amp; admins can change these.</span>}
+        </div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))" }}>
+          <div className="flex items-center gap-3" style={{ padding: "10px 12px", background: C.panel2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+            <Switch on={auto.doors} disabled={!canEdit} onChange={(v) => setSwitch("doors", v)} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Doors <span style={{ fontFamily: mono, fontSize: 11, color: auto.doors ? C.go : C.dim }}>{auto.doors ? "LIVE" : "off"}</span></div>
+              <div style={{ fontSize: 12, color: C.dim }}>Unlock mapped room doors around bookings{data.geovisionLive ? "" : " (GeoVision not connected)"}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3" style={{ padding: "10px 12px", background: C.panel2, borderRadius: 8, border: `1px solid ${C.border}` }}>
+            <Switch on={auto.climate} disabled={!canEdit} onChange={(v) => setSwitch("climate", v)} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Climate <span style={{ fontFamily: mono, fontSize: 11, color: auto.climate ? C.go : C.dim }}>{auto.climate ? "LIVE" : "off"}</span></div>
+              <div style={{ fontSize: 12, color: C.dim }}>Hold mapped thermostats around bookings{data.thermohubLive ? "" : " (ThermoHub not connected)"}</div>
+            </div>
+          </div>
+        </div>
+      </Panel>
       {sched && (
         <div className="flex items-center gap-3 flex-wrap" style={{ padding: "10px 14px", background: tickStale ? C.amberBg : C.goBg, border: `1px solid ${C.border}`, borderLeft: `3px solid ${tickStale ? C.amber : C.go}`, borderRadius: 6, fontSize: 12.5, fontFamily: mono }}>
           {tickStale ? <AlertTriangle size={14} color={C.amber} /> : <CircleCheck size={14} color={C.go} />}
           <span style={{ color: C.text }}>
-            Scheduler last ran <strong>{ago}</strong>{tick?.source ? ` (${tick.source === "cron" ? "external cron" : "open dashboard"})` : ""}
+            Scheduler last ran <strong>{ago}</strong>{tick?.source ? ` (${tick.source === "cron" ? "external cron" : tick.source === "switch" ? "switch flipped" : "open dashboard"})` : ""}
             {tick?.errors ? <span style={{ color: C.red }}> · {tick.errors} failed action{tick.errors === 1 ? "" : "s"}</span> : ""}
           </span>
           <span style={{ color: C.mid, marginLeft: "auto" }}>
