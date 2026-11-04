@@ -14,8 +14,8 @@ import { haOps } from "../haService.js";
   apps:
 
     DOOR_SERVICE_TOKEN=<long random string>   (both apps)
-    MEMBER_DOOR_NAMES=fitnesszone,medicalent  (optional; allowed doors by name match,
-                                               default "fitnesszone,medicalent";
+    MEMBER_DOOR_NAMES=fitnesszone,frontdoor   (optional; allowed doors by name match,
+                                               default "fitnesszone,frontdoor";
                                                legacy MEMBER_DOOR_NAME feeds the first slot)
     MEMBER_DOOR_RELOCK_SECONDS=7              (only used on the Home Assistant path)
 
@@ -37,12 +37,12 @@ export const memberDoorRouter = Router();
 const RELOCK_SECONDS = Math.max(3, Number(process.env.MEMBER_DOOR_RELOCK_SECONDS || 7));
 // Doors members may open from their account page, by GV-Access name
 // match. "FitnessZone" is the gym entrance (it was "WorkOutRM" until
-// August 2026 — IT renamed it); "MedicalEnt" is the medical building
+// August 2026 — IT renamed it); "FrontDoor" is the building's main
 // entrance members also use. MEMBER_DOOR_NAMES overrides the whole
 // list; legacy MEMBER_DOOR_NAME still renames the first (fitness) slot.
 const DOOR_NAMES = (
   process.env.MEMBER_DOOR_NAMES
-  || `${process.env.MEMBER_DOOR_NAME || "fitnesszone"},medicalent`
+  || `${process.env.MEMBER_DOOR_NAME || "fitnesszone"},frontdoor`
 ).toLowerCase().split(/[\s,;]+/).filter(Boolean);
 const DOOR_NAME = DOOR_NAMES[0]; // the fitness door — legacy pick/HA paths
 
