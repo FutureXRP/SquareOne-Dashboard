@@ -223,6 +223,12 @@ token. Ask whoever runs ThermoHub for one, then set in Vercel:
 | `CLIMATE_EVENT_HEAT` / `CLIMATE_EVENT_COOL` | The hold a booked room gets (default 70° / 74°). |
 | `CLIMATE_PRE_LEAD_MIN` / `CLIMATE_POST_LAG_MIN` | Hold from N min before a booking until N min after (default 60 / 60). |
 
+**Master switches.** Both booking automations (doors, climate) sit behind
+on/off switches at the top of the **Automation** tab (`app_settings.automation`),
+and both default to **off**. While a switch is off the schedule is still
+computed and shown, but nothing touches a real device and anything already
+held is released. Flip each on when you're ready to go live.
+
 What it drives:
 - **Home card + Climate tab** — live temperature, humidity, target, mode, equipment, motion, and hold status per thermostat. Managers/admins can set mode, place a temporary hold (heat/cool pair for 1–8 h or indefinitely) or resume the schedule. Every action is audited (`climate.hold`, `climate.resume`, `climate.mode`).
 - **Booking climate** — map rooms to thermostats in **Automation → Room → Thermostat mapping** (`app_settings.climate_booking_map`). The same `/api/doors/run` tick that drives doors places a ThermoHub hold at the event setpoints from `CLIMATE_PRE_LEAD_MIN` before each confirmed booking until `CLIMATE_POST_LAG_MIN` after, extends it across overlapping bookings, then resumes the schedule — only if the hold on record is ours, so a hold someone set by hand is left alone (`climate.auto-hold` / `climate.auto-resume`).
