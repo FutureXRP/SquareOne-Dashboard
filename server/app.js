@@ -16,6 +16,7 @@ import { adminRouter } from "./providers/admin.js";
 import { chatRouter } from "./providers/chat.js";
 import { elcRouter } from "./providers/elc.js";
 import { interactiveRouter } from "./providers/interactive.js";
+import { thermohubRouter } from "./providers/thermohub.js";
 import { requireAdmin } from "./auth.js";
 
 /*
@@ -42,6 +43,7 @@ app.get("/api/health", (_req, res) => {
       napco: config.napco.configured,
       geovision: config.geovision.configured,
       interactive: config.interactive.configured,
+      thermohub: config.thermohub.configured,
     },
   });
 });
@@ -49,6 +51,7 @@ app.get("/api/health", (_req, res) => {
 // Everything below requires a signed-in user when Supabase auth is enabled.
 app.use("/api/amilia", requireAuth, amiliaRouter);         // legacy — being retired
 app.use("/api/interactive", requireAuth, interactiveRouter); // bookings + memberships
+app.use("/api/thermohub", requireAuth, thermohubRouter);     // ecobee thermostats via ThermoHub
 app.use("/api/hik", requireAuth, hikRouter);
 app.use("/api/procare", requireAuth, procareRouter);
 app.use("/api/hub", requireAuth, hubRouter);

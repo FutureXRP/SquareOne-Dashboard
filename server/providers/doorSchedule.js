@@ -2,7 +2,7 @@ import { Router } from "express";
 import { config, guard } from "../config.js";
 import { requireAuth, requireManager, logAudit, supabaseAdmin } from "../auth.js";
 import { fetchBookingSpans, fetchFacilities } from "./interactive.js";
-import { haConfigured, haOps } from "../haService.js";
+import { fetchThermostats, thHold, thResume, thermohubConfigured } from "./thermohub.js";
 import { checkNewMembers } from "./memberAlerts.js";
 import { gvDoorOp, gvDoorTree, GV_DOOR_OPS } from "./buildingClouds.js";
 import { memberDoorSetting } from "./memberDoor.js";
@@ -32,9 +32,18 @@ export const doorsRouter = Router();
   by Interactive facility id like "gym" → "ctrl:door"). Unmapped rooms do nothing.
   The member "Unlock door" button uses a separate door: app_settings 'member_door'.
 
+  Climate works the same way through ThermoHub (app_settings 'climate_booking_map',
+  facility id → ThermoHub thermostat id): inside a window the thermostat gets a
+  ThermoHub HOLD at the event setpoints (CLIMATE_EVENT_HEAT/COOL) that expires at
+  the window's end; outside, we RESUME its schedule — but only if we're the one
+  who placed the hold, so a hold a person set by hand is left alone. Overlapping
+  bookings extend the hold to the last one's end.
+      preAt  = start − CLIMATE_PRE_LEAD_MIN
+      postAt = end   + CLIMATE_POST_LAG_MIN
+
   GET  /api/doors/schedule      (signed-in) — today's computed windows.
-  GET  /api/doors/booking-map   (signed-in) — rooms + doors + mapping + member door.
-  PUT  /api/doors/booking-map   (manager)   — save mapping / member door.
+  GET  /api/doors/booking-map   (signed-in) — rooms + doors + thermostats + mappings.
+  PUT  /api/doors/booking-map   (manager)   — save mappings / member door.
   POST /api/doors/run           (cron)      — the reconciler tick.
 */
 
@@ -64,14 +73,23 @@ function resolveDoor(span, map, gvDoors) {
   return { ctrl, door, name: gv?.name || `Door ${ctrl}:${door}` };
 }
 
-// Climate zone resolution stays name/env-based (HVAC deferred — dry runs).
-function zoneForRoom(room) {
-  const r = norm(room);
-  if (!r) return null;
-  const map = config.climate.map, zones = config.homeassistant.entities.zones || {};
-  for (const [loc, id] of Object.entries(map)) { const l = norm(loc); if ((r.includes(l) || l.includes(r)) && zones[id]) return id; }
-  for (const [id, def] of Object.entries(zones)) { const d = norm(def.name); if (d && (r.includes(d) || d.includes(r))) return id; }
-  return null;
+// --- Room → thermostat mapping (admin-managed, ThermoHub ids) ------------------
+async function getClimateMap() {
+  if (!supabaseAdmin) return {};
+  try {
+    const { data } = await supabaseAdmin.from("app_settings").select("value").eq("key", "climate_booking_map").maybeSingle();
+    return data?.value && typeof data.value === "object" ? data.value : {};
+  } catch { return {}; }
+}
+function resolveThermostat(span, cmap, thermostats) {
+  let id = cmap[span.facilityId];
+  if (!id) {
+    const r = norm(span.room);
+    for (const [k, v] of Object.entries(cmap)) if (norm(k) === r) { id = v; break; }
+  }
+  if (!id) return null;
+  const t = (thermostats || []).find((x) => x.id === id);
+  return { id, name: t?.name || `Thermostat ${id}`, online: t ? t.online : true };
 }
 
 // Confirmed, approved bookings yesterday..tomorrow (buffer-aware spans).
@@ -95,19 +113,17 @@ function doorWindows(spans, map, gvDoors) {
     .sort((a, b) => a.unlockAt - b.unlockAt);
 }
 
-// Climate windows: event setpoint before start, idle setpoint after end.
-function climateWindows(spans) {
+// Climate windows: hold at the event setpoints before start, resume after end.
+function climateWindows(spans, cmap, thermostats) {
   const pre = config.climate.preMin * 60000, post = config.climate.postMin * 60000, now = Date.now();
   return spans
     .map((s) => {
-      const zoneId = zoneForRoom(s.room);
-      const sp = (zoneId && config.climate.setpoints[zoneId]) || {};
+      const t = resolveThermostat(s, cmap, thermostats);
       const preAt = s.start - pre, postAt = s.end + post;
       return {
-        id: s.id, room: s.room, activity: s.activity,
-        zoneId, zoneName: zoneId ? config.homeassistant.entities.zones[zoneId].name : null,
-        eventTemp: Number(sp.event) || config.climate.eventTemp,
-        idleTemp: Number(sp.idle) || config.climate.idleTemp,
+        id: s.id, code: s.code, room: s.room, facilityId: s.facilityId, activity: s.activity, who: s.who,
+        thermostatId: t?.id || null, thermostatName: t?.name || null,
+        heat: config.climate.eventHeat, cool: config.climate.eventCool,
         preAt, postAt,
         status: now < preAt ? "scheduled" : now < postAt ? "conditioning" : "done",
       };
@@ -150,23 +166,63 @@ async function reconcileDoors(windows, live, req, actions, now) {
   }
 }
 
-const loadAll = () => Promise.all([fetchSpans(), getBookingMap(), gvDoorTree().catch(() => [])]);
+// State-based climate reconciliation, mirroring the doors. Per mapped
+// thermostat: desired = a hold until the latest covering window's end. We act
+// when that differs from what we last applied (kv 'climate-state': "hold" with
+// meta.until, or "idle"). A hold is re-placed when a later overlapping booking
+// pushes the end out; a person's own hold is never touched because we only
+// resume when OUR hold is the one on record.
+const CLIMATE_STATE = "climate-state";
+async function reconcileClimate(windows, live, req, actions, now) {
+  const ids = [...new Set(windows.map((w) => w.thermostatId).filter(Boolean))];
+  for (const id of ids) {
+    const mine = windows.filter((w) => w.thermostatId === id);
+    const covering = mine.filter((w) => w.preAt <= now && now < w.postAt);
+    const wantHold = covering.length > 0;
+    const until = wantHold ? Math.max(...covering.map((w) => w.postAt)) : null;
+    const last = await getCachedToken(CLIMATE_STATE, id);
+    const holding = last?.token === "hold";
+    const heldUntil = Number(last?.meta?.until) || 0;
+    if (wantHold === holding && (!wantHold || Math.abs(heldUntil - until) < 60000)) continue;
+    const w = covering[0] || mine.filter((x) => x.postAt <= now).sort((a, b) => b.postAt - a.postAt)[0] || mine[0];
+    let executed = false, error = null;
+    if (live) {
+      try {
+        if (wantHold) await thHold(id, w.heat, w.cool, until); else await thResume(id);
+        executed = true;
+      } catch (e) { error = e.message; }
+      if (executed) {
+        if (wantHold) await setCachedToken(CLIMATE_STATE, id, "hold", { until, booking: w.id }, until + STATE_TTL);
+        else await setCachedToken(CLIMATE_STATE, id, "idle", {}, now + STATE_TTL);
+      }
+    }
+    const detail = wantHold ? { heat: w.heat, cool: w.cool, until: new Date(until).toISOString() } : {};
+    logAudit(req, wantHold ? "climate.auto-hold" : "climate.auto-resume", w.id, { room: w.room, activity: w.activity, thermostat: w.thermostatName, executed, ...detail, ...(error ? { error } : {}) });
+    actions.push({ target: id, name: w.thermostatName, action: wantHold ? "hold" : "resume", room: w.room, activity: w.activity, executed, error, ...detail });
+  }
+}
+
+const loadAll = () => Promise.all([
+  fetchSpans(), getBookingMap(), gvDoorTree().catch(() => []),
+  getClimateMap(), thermohubConfigured() ? fetchThermostats().catch(() => []) : Promise.resolve([]),
+]);
 
 // Today's windows for the Bookings/Automation UI.
 doorsRouter.get(
   "/schedule",
   requireAuth,
   guard("interactive", async () => {
-    const [spans, map, gvDoors] = await loadAll();
+    const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
     return {
       leadMin: config.doors.leadMin,
       lagMin: config.doors.lagMin,
       geovisionLive: config.geovision.configured,
+      thermohubLive: thermohubConfigured(),
       windows: doorWindows(spans, map, gvDoors),
       climate: {
         preMin: config.climate.preMin, postMin: config.climate.postMin,
-        eventTemp: config.climate.eventTemp, idleTemp: config.climate.idleTemp,
-        windows: climateWindows(spans),
+        heat: config.climate.eventHeat, cool: config.climate.eventCool,
+        windows: climateWindows(spans, cmap, thermostats),
       },
     };
   })
@@ -177,15 +233,20 @@ doorsRouter.get(
   "/booking-map",
   requireAuth,
   guard("interactive", async () => {
-    const [rooms, doors, map, memberDoor] = await Promise.all([
+    const [rooms, doors, map, memberDoor, climateMap, thermostats] = await Promise.all([
       fetchFacilities(true), gvDoorTree().catch(() => []), getBookingMap(), memberDoorSetting(),
+      getClimateMap(), thermohubConfigured() ? fetchThermostats().catch(() => []) : Promise.resolve([]),
     ]);
     return {
       // Inactive rooms are included (flagged) so they can be pre-mapped; the
       // scheduler itself only ever sees bookings, which only active rooms take.
       rooms: rooms.map((r) => ({ id: r.id, name: r.name, color: r.color, active: r.active, setupMin: r.setupMin, cleanupMin: r.cleanupMin })),
       doors: doors || [], map, memberDoor,
+      thermostats: (thermostats || []).map((t) => ({ id: t.id, name: t.name, building: t.building, online: t.online })),
+      climateMap,
       leadMin: config.doors.leadMin, lagMin: config.doors.lagMin, geovisionLive: config.geovision.configured,
+      climatePreMin: config.climate.preMin, climatePostMin: config.climate.postMin,
+      climateHeat: config.climate.eventHeat, climateCool: config.climate.eventCool, thermohubLive: thermohubConfigured(),
     };
   })
 );
@@ -214,6 +275,15 @@ doorsRouter.put(
       logAudit(req, "doors.member-door", door || null, {});
       out.memberDoor = door;
     }
+    if (req.body && typeof req.body.climateMap === "object") {
+      const clean = {};
+      for (const [room, val] of Object.entries(req.body.climateMap)) {
+        if (val && /^[\w.-]{1,64}$/.test(String(val))) clean[String(room)] = String(val);
+      }
+      await supabaseAdmin.from("app_settings").upsert({ key: "climate_booking_map", value: clean, updated_at: stamp }, { onConflict: "key" });
+      logAudit(req, "climate.booking-map", null, { rooms: Object.keys(clean).length });
+      out.climateMap = clean;
+    }
     return out;
   })
 );
@@ -227,56 +297,25 @@ function cronAuth(req, res, next) {
   next();
 }
 
-// The reconciler tick. Acts only on window edges that passed within the lookback
-// period, so a delayed cron still catches them and manual overrides outside the
-// edges are left alone. Doors → GeoVision; climate → Home Assistant (dry-run
-// until thermostats are installed).
+// The reconciler tick. Doors → GeoVision; climate → ThermoHub. Both are
+// state-based (see headers), so a sparse or late cron still converges.
 doorsRouter.all(
   "/run",
   cronAuth,
   guard("interactive", async (req) => {
-    const [spans, map, gvDoors] = await loadAll();
+    const [spans, map, gvDoors, cmap, thermostats] = await loadAll();
     const now = Date.now();
-    const lookback = config.doors.lookbackMin * 60000;
     const actions = [];
 
-    // Generic edge reconciler with overlap coverage — back-to-back/overlapping
-    // bookings keep the "on" state until the LAST window clears.
-    const reconcile = async (windows, key, onAt, offAt, applyOn, applyOff, label, live) => {
-      const covered = (id) => windows.some((w) => w[key] === id && w[onAt] <= now && now < w[offAt]);
-      const acted = new Set();
-      for (const w of windows) {
-        const id = w[key];
-        if (!id || acted.has(id)) continue;
-        const onEdge = now - lookback < w[onAt] && w[onAt] <= now && now < w[offAt];
-        const offEdge = now - lookback < w[offAt] && w[offAt] <= now && !covered(id);
-        if (!onEdge && !offEdge) continue;
-        let executed = false, error = null;
-        if (live) {
-          try { await (onEdge ? applyOn(w) : applyOff(w)); executed = true; }
-          catch (e) { error = e.message; }
-        }
-        const action = onEdge ? label.on : label.off;
-        logAudit(req, action.audit, id, { room: w.room, activity: w.activity, executed, ...(action.detail?.(w) || {}) });
-        acted.add(id);
-        actions.push({ target: id, name: w.doorName || w.zoneName, action: action.name, room: w.room, activity: w.activity, executed, error, ...(action.detail?.(w) || {}) });
-      }
-    };
-
     await reconcileDoors(doorWindows(spans, map, gvDoors), config.geovision.configured, req, actions, now);
-    await reconcile(
-      climateWindows(spans), "zoneId", "preAt", "postAt",
-      (w) => haOps.setTemp(w.zoneId, w.eventTemp), (w) => haOps.setTemp(w.zoneId, w.idleTemp),
-      {
-        on: { name: "set-event-temp", audit: "climate.auto-event", detail: (w) => ({ temp: w.eventTemp }) },
-        off: { name: "set-idle-temp", audit: "climate.auto-idle", detail: (w) => ({ temp: w.idleTemp }) },
-      },
-      haConfigured()
-    );
+    await reconcileClimate(climateWindows(spans, cmap, thermostats), thermohubConfigured(), req, actions, now);
 
     // Same tick also watches for new members — never fails the tick.
     const memberAlerts = await checkNewMembers(req);
 
-    return { at: new Date(now).toISOString(), geovisionLive: config.geovision.configured, spanCount: spans.length, actions, memberAlerts };
+    return {
+      at: new Date(now).toISOString(), geovisionLive: config.geovision.configured, thermohubLive: thermohubConfigured(),
+      spanCount: spans.length, actions, memberAlerts,
+    };
   })
 );
