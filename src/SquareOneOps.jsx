@@ -217,7 +217,9 @@ export default function SquareOneOps({ user, role, roleTabs = {}, entity = null,
         if (stop || !r?.ok || !r.data?.ran) return;
         for (const a of r.data.actions || []) {
           if (!a.executed) continue;
-          pushLog(`Schedule: ${a.action === "unlock" ? "unlocked" : a.action === "lock" ? "relocked" : a.action === "hold" ? "set hold on" : "resumed schedule on"} ${a.name}${a.room ? ` for ${a.room}` : ""}`, a.action === "unlock" || a.action === "hold" ? "amber" : "go");
+          const verb = { unlock: "unlocked", lock: "relocked", hold: "set hold on", resume: "resumed schedule on",
+            "onetime-create": "scheduled ThermoHub hold on", "onetime-update": "updated ThermoHub hold on", "onetime-delete": "removed ThermoHub hold from" }[a.action] || a.action;
+          pushLog(`Schedule: ${verb} ${a.name}${a.room ? ` for ${a.room}` : ""}`, ["unlock", "hold", "onetime-create", "onetime-update"].includes(a.action) ? "amber" : "go");
         }
       }).catch(() => {});
     beat();
@@ -1771,6 +1773,13 @@ function ThermostatPanel({ t, act, canCtl }) {
       <div style={{ marginTop: 10, fontSize: 12, fontFamily: mono, color: t.hold ? C.amber : C.mid }}>
         {holdLabel(t)}{t.schedule ? <span style={{ color: C.dim }}> · profile {t.schedule.name}</span> : ""}
       </div>
+      {t.oneTime?.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 12, fontFamily: mono, color: C.mid }}>
+          {t.oneTime[0].started ? "Running" : "Next"}: {t.oneTime[0].name.replace(/\s*\(SO#[^)]*\)\s*$/, "")} ·{" "}
+          {new Date(t.oneTime[0].start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}–{new Date(t.oneTime[0].end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {t.oneTime[0].heat}°–{t.oneTime[0].cool}°
+          {t.oneTime.length > 1 ? <span style={{ color: C.dim }}> · +{t.oneTime.length - 1} more</span> : ""}
+        </div>
+      )}
       {t.alert && <div style={{ marginTop: 6, fontSize: 12, color: C.red }}>{t.alert}</div>}
 
       <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
@@ -1921,6 +1930,8 @@ function BookingAutomation() {
     { text: "scheduled", color: C.cyan };
   const climChip = (w) =>
     !w.thermostatId ? { text: "no thermostat mapped", color: C.amber } :
+    w.status === "done" ? { text: "done", color: C.dim } :
+    !w.synced ? { text: auto.climate ? "not in ThermoHub yet" : "paused", color: C.amber } :
     w.status === "conditioning" ? { text: "HOLDING", color: C.go } :
     w.status === "done" ? { text: "done", color: C.dim } :
     { text: "scheduled", color: C.cyan };
@@ -1940,8 +1951,8 @@ function BookingAutomation() {
       {sched.climate?.windows?.length > 0 && (
         <Panel title="Climate Schedule" accent={C.amber} right={climateTag}>
           <div style={{ fontSize: 12, color: C.dim, fontFamily: mono, paddingBottom: 8 }}>
-            hold {sched.climate.heat}°–{sched.climate.cool}° from {sched.climate.preMin} min before · back on schedule {sched.climate.postMin} min after
-            {" · overlapping events extend the hold"}
+            each booking becomes a ThermoHub one-time schedule: {sched.climate.heat}°–{sched.climate.cool}° from {sched.climate.preMin} min before to {sched.climate.postMin} min after
+            {" · next 7 days · overlapping bookings are merged"}
           </div>
           {sched.climate.windows.map((w) => (
             <Row key={`c-${w.id}`} k={`c-${w.id}`} from={w.preAt} to={w.postAt} room={w.room}
@@ -2539,8 +2550,10 @@ function Automation({ role, authEnabled }) {
         right={<span style={{ fontSize: 11, fontFamily: mono, color: data.thermohubLive ? (climateCount ? C.go : C.dim) : C.amber }}>
           {data.thermohubLive ? `${climateCount} mapped` : "ThermoHub not connected"}</span>}>
         <div style={{ fontSize: 13, color: C.mid, lineHeight: 1.6, marginBottom: 8 }}>
-          Each mapped room gets a <strong>ThermoHub hold at {data.climateHeat}°–{data.climateCool}°</strong> from <strong>{data.climatePreMin} min before</strong> a
-          booking until <strong>{data.climatePostMin} min after</strong>, then goes back on its normal schedule. Holds people set by hand are left alone.
+          Each approved booking in the next 7 days becomes a <strong>ThermoHub one-time schedule</strong> on its room's thermostat:
+          <strong> {data.climateHeat}°–{data.climateCool}°</strong> from <strong>{data.climatePreMin} min before</strong> until <strong>{data.climatePostMin} min after</strong>.
+          ThermoHub's own timer runs it, so the room is ready even if nobody has this dashboard open that day. Cancelled or moved
+          bookings are removed or updated on the next sync; entries people create by hand in ThermoHub are never touched.
           {!data.thermohubLive && <span style={{ color: C.amber }}> Dry-run until THERMOHUB_TOKEN is set in Vercel.</span>}
         </div>
         {!data.thermohubLive

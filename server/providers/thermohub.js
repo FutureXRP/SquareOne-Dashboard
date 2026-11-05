@@ -18,6 +18,11 @@ export const thermohubRouter = Router();
     POST /api/thermostats/:id/resume        back to the schedule profile
     POST /api/thermostats/:id/mode          { mode: heat|cool|auto|off }
     POST /api/buildings/:id/resume          resume every thermostat in a building
+    POST /api/one-time                      { businessId, name, buildingIds, thermostatIds, start, end, heat, cool }
+    PUT  /api/one-time/:id                  same body (+ id); DELETE /api/one-time/:id
+      One-time schedules: ThermoHub's own timer places a hold on each target
+      at `start` (epoch ms) and clears it at `end`, then drops the entry.
+      /api/state lists the pending + running ones as `oneTimeSchedules`.
 
   Auth is a bearer token. The web app uses a Microsoft sign-in token; a server
   can't get one of those, so THERMOHUB_TOKEN must be an integration token that
@@ -89,10 +94,44 @@ function effective(t, sched) {
   return { heat: p?.heat ?? null, cool: p?.cool ?? null, source: occ ? "occupied" : recovering ? "recovery" : "unoccupied", hold: null };
 }
 
+// --- One-time schedules ---------------------------------------------------------
+export async function fetchOneTimes(maxAgeMs) {
+  const s = await fetchState(maxAgeMs);
+  return Array.isArray(s.oneTimeSchedules) ? s.oneTimeSchedules : [];
+}
+function cleanOneTime(d) {
+  const h = Math.round(Number(d.heat)), c = Math.round(Number(d.cool));
+  if (!(h >= 45 && h <= 90 && c >= 50 && c <= 95)) throw new Error("Setpoints must be between 45° and 95°.");
+  if (c - h < 2) throw new Error("Cool setpoint must be at least 2° above heat setpoint.");
+  if (!(Number(d.end) > Number(d.start))) throw new Error("The end must be after the start.");
+  return {
+    businessId: d.businessId, name: String(d.name || "").slice(0, 120),
+    buildingIds: Array.isArray(d.buildingIds) ? d.buildingIds : [],
+    thermostatIds: Array.isArray(d.thermostatIds) ? d.thermostatIds : [],
+    start: Number(d.start), end: Number(d.end), heat: h, cool: c,
+  };
+}
+export async function createOneTime(d) {
+  const r = await thCall("POST", "/api/one-time", cleanOneTime(d));
+  invalidate();
+  return r;
+}
+export async function updateOneTime(id, d) {
+  const r = await thCall("PUT", `/api/one-time/${encodeURIComponent(id)}`, { id, ...cleanOneTime(d) });
+  invalidate();
+  return r;
+}
+export async function deleteOneTime(id) {
+  const r = await thCall("DELETE", `/api/one-time/${encodeURIComponent(id)}`);
+  invalidate();
+  return r;
+}
+
 // Normalized thermostats, optionally limited to THERMOHUB_BUILDING.
 export async function fetchThermostats(maxAgeMs) {
   const s = await fetchState(maxAgeMs);
   const buildings = s.buildings || [], businesses = s.businesses || [], schedules = s.schedules || [];
+  const oneTimes = Array.isArray(s.oneTimeSchedules) ? s.oneTimeSchedules : [];
   const want = config.thermohub.building.trim().toLowerCase();
   const bld = (id) => buildings.find((b) => b.id === id);
   return (s.thermostats || [])
@@ -106,9 +145,16 @@ export async function fetchThermostats(maxAgeMs) {
       const biz = businesses.find((x) => x.id === t.businessId);
       const sched = schedules.find((x) => x.id === t.scheduleId) || null;
       const e = effective(t, sched);
+      // Upcoming/running one-time schedules that cover this thermostat.
+      const upcoming = oneTimes
+        .filter((o) => (o.thermostatIds || []).includes(t.id) || (o.buildingIds || []).includes(t.buildingId))
+        .map((o) => ({ id: o.id, name: o.name, start: o.start, end: o.end, heat: o.heat, cool: o.cool, started: Boolean(o.started) }))
+        .sort((a, b) => a.start - b.start);
       return {
         id: t.id, name: t.name, model: t.model || "", building: b?.name || null, buildingId: t.buildingId || null,
+        businessId: t.businessId || null,
         temp: t.temp ?? null, humidity: t.humidity ?? null,
+        oneTime: upcoming,
         mode: t.mode || null, equipment: t.equipment || "idle", occupied: Boolean(t.occupied),
         heat: e.heat, cool: e.cool, source: e.source,
         hold: e.hold ? { type: e.hold.type || "manual", heat: e.hold.heat, cool: e.hold.cool, until: e.hold.until || null, by: e.hold.by || null } : null,
@@ -185,6 +231,7 @@ thermohubRouter.get("/debug", requireAuth, requireAdmin, guard("thermohub", asyn
     businesses: (s.businesses || []).map((b) => ({ id: b.id, name: b.name, hub: b.hub })),
     buildings: (s.buildings || []).map((b) => ({ id: b.id, name: b.name, businessId: b.businessId })),
     schedules: (s.schedules || []).map((x) => ({ id: x.id, name: x.name, occupied: x.occupied, unoccupied: x.unoccupied })),
+    oneTimeSchedules: s.oneTimeSchedules || [],
     thermostats: await fetchThermostats(0),
   };
 }));

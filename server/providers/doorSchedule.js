@@ -2,7 +2,7 @@ import { Router } from "express";
 import { config, guard } from "../config.js";
 import { requireAuth, requireManager, logAudit, supabaseAdmin } from "../auth.js";
 import { fetchBookingSpans, fetchFacilities } from "./interactive.js";
-import { fetchThermostats, thHold, thResume, thermohubConfigured } from "./thermohub.js";
+import { fetchThermostats, fetchOneTimes, createOneTime, updateOneTime, deleteOneTime, thermohubConfigured } from "./thermohub.js";
 import { checkNewMembers } from "./memberAlerts.js";
 import { gvDoorOp, gvDoorTree, GV_DOOR_OPS } from "./buildingClouds.js";
 import { memberDoorSetting } from "./memberDoor.js";
@@ -37,14 +37,14 @@ export const doorsRouter = Router();
   schedule is still computed and shown, but nothing touches a device, and
   anything already held is released.
 
-  Climate works the same way through ThermoHub (app_settings 'climate_booking_map',
-  facility id → ThermoHub thermostat id): inside a window the thermostat gets a
-  ThermoHub HOLD at the event setpoints (CLIMATE_EVENT_HEAT/COOL) that expires at
-  the window's end; outside, we RESUME its schedule — but only if we're the one
-  who placed the hold, so a hold a person set by hand is left alone. Overlapping
-  bookings extend the hold to the last one's end.
-      preAt  = start − CLIMATE_PRE_LEAD_MIN
-      postAt = end   + CLIMATE_POST_LAG_MIN
+  Climate goes through ThermoHub's ONE-TIME SCHEDULES (app_settings
+  'climate_booking_map', facility id → ThermoHub thermostat id): every approved
+  booking a week out becomes a tagged one-time entry at the event setpoints
+  (CLIMATE_EVENT_HEAT/COOL), and ThermoHub's own timer holds the thermostat for
+  it — so the room is conditioned on time even if no tick runs that day.
+      start = booking start − CLIMATE_PRE_LEAD_MIN
+      end   = booking end   + CLIMATE_POST_LAG_MIN
+  See the climate section below for the sync rules.
 
   GET  /api/doors/schedule      (signed-in) — today's computed windows + last tick.
   GET  /api/doors/booking-map   (signed-in) — rooms + doors + thermostats + mappings.
@@ -195,50 +195,87 @@ export async function reconcileDoors(windows, live, req, actions, now, gvDoors) 
   }
 }
 
-// State-based climate reconciliation, mirroring the doors. Per mapped
-// thermostat: desired = a hold until the latest covering window's end. We act
-// when that differs from what we last applied (kv 'climate-state': "hold" with
-// meta.until, or "idle"). A hold is re-placed when a later overlapping booking
-// pushes the end out; a person's own hold is never touched because we only
-// resume when OUR hold is the one on record.
-const CLIMATE_STATE = "climate-state";
+/*
+  Climate: keep ThermoHub's ONE-TIME SCHEDULES in step with the bookings.
+
+  Rather than placing holds ourselves at the right minute (which needs our tick
+  to be awake at the right minute), we push each upcoming booking into ThermoHub
+  as a one-time schedule and let ITS timer start and end the hold. The sync only
+  has to happen sometime before the event, so it tolerates hours without a tick.
+
+  ThermoHub has no external-reference field, so every entry we create carries a
+  tag in its name — "… (SO#<booking code>)" — and we only ever touch entries
+  carrying that tag. Overlapping bookings on one thermostat become ONE merged
+  entry (tag "SO#a+b"), since ThermoHub's holds would otherwise clobber each
+  other's end times. Entries whose bookings are gone (cancelled, re-opened for
+  review, unmapped) are deleted; moved bookings are updated in place.
+*/
+const TAG_RE = /\(SO#([^)]+)\)\s*$/;
+const tagOf = (name) => (String(name || "").match(TAG_RE) || [])[1] || null;
+
+// Merge each thermostat's windows into non-overlapping one-time entries.
 // Exported for tests only.
-export async function reconcileClimate(windows, live, req, actions, now, thermostats) {
-  // Current windows' thermostats plus any we still hold (cancelled booking).
-  const held = (await listCachedTokens(CLIMATE_STATE)).filter((s) => s.token === "hold").map((s) => s.scope);
-  const ids = [...new Set([...windows.map((w) => w.thermostatId).filter(Boolean), ...held])];
-  for (const id of ids) {
-    const mine = windows.filter((w) => w.thermostatId === id);
-    const covering = mine.filter((w) => w.preAt <= now && now < w.postAt);
-    const wantHold = covering.length > 0;
-    const until = wantHold ? Math.max(...covering.map((w) => w.postAt)) : null;
-    const last = await getCachedToken(CLIMATE_STATE, id);
-    const holding = last?.token === "hold";
-    const heldUntil = Number(last?.meta?.until) || 0;
-    if (wantHold === holding && (!wantHold || Math.abs(heldUntil - until) < 60000)) continue;
-    const w = covering[0] || mine.filter((x) => x.postAt <= now).sort((a, b) => b.postAt - a.postAt)[0] || mine[0]
-      || { id: null, thermostatName: (thermostats || []).find((t) => t.id === id)?.name || `Thermostat ${id}`, room: "", activity: "booking cancelled or unmapped" };
-    let executed = false, error = null;
-    if (live) {
-      try {
-        if (wantHold) await thHold(id, w.heat, w.cool, until); else await thResume(id);
-        executed = true;
-      } catch (e) { error = e.message; }
-      if (executed) {
-        if (wantHold) await setCachedToken(CLIMATE_STATE, id, "hold", { until, booking: w.id }, until + STATE_TTL);
-        else await setCachedToken(CLIMATE_STATE, id, "idle", {}, now + STATE_TTL);
-      }
+export function climatePlan(windows) {
+  const byT = new Map();
+  for (const w of windows) if (w.thermostatId) (byT.get(w.thermostatId) || byT.set(w.thermostatId, []).get(w.thermostatId)).push(w);
+  const desired = [];
+  for (const [thermostatId, list] of byT) {
+    list.sort((a, b) => a.preAt - b.preAt);
+    let cur = null;
+    for (const w of list) {
+      if (cur && w.preAt <= cur.end) { cur.end = Math.max(cur.end, w.postAt); cur.windows.push(w); }
+      else { cur = { thermostatId, thermostatName: w.thermostatName, start: w.preAt, end: w.postAt, heat: w.heat, cool: w.cool, windows: [w] }; desired.push(cur); }
     }
-    const detail = wantHold ? { heat: w.heat, cool: w.cool, until: new Date(until).toISOString() } : {};
-    logAudit(req, wantHold ? "climate.auto-hold" : "climate.auto-resume", w.id, { room: w.room, activity: w.activity, thermostat: w.thermostatName, executed, ...detail, ...(error ? { error } : {}) });
-    actions.push({ target: id, name: w.thermostatName, action: wantHold ? "hold" : "resume", room: w.room, activity: w.activity, executed, error, ...detail });
+  }
+  for (const d of desired) {
+    d.key = d.windows.map((w) => w.code || String(w.id).slice(0, 8)).join("+");
+    const label = d.windows.length === 1 ? `${d.windows[0].room} · ${d.windows[0].activity}` : `${d.windows[0].room} · ${d.windows.length} bookings`;
+    d.name = `${label} (SO#${d.key})`.slice(0, 120);
+  }
+  return desired;
+}
+
+// Make ThermoHub's tagged one-time entries match `desired`. Exported for tests.
+export async function syncOneTimes(desired, existing, live, req, actions, now, thermostats, ops = { createOneTime, updateOneTime, deleteOneTime }) {
+  const mine = (existing || []).filter((o) => tagOf(o.name));
+  const byKey = new Map(mine.map((o) => [tagOf(o.name), o]));
+  const nameOf = (id) => (thermostats || []).find((t) => t.id === id)?.name || `Thermostat ${id}`;
+  const bizOf = (id) => (thermostats || []).find((t) => t.id === id)?.businessId || mine[0]?.businessId || null;
+  const run = async (action, target, fn, detail) => {
+    let executed = false, error = null;
+    if (live) { try { await fn(); executed = true; } catch (e) { error = e.message; } }
+    logAudit(req, `climate.onetime-${action}`, target.key || null, { thermostat: target.thermostatName, executed, ...detail, ...(error ? { error } : {}) });
+    actions.push({ target: target.thermostatId, name: target.thermostatName, action: `onetime-${action}`, room: target.room || "", activity: target.activity || "", executed, error, ...detail });
+  };
+  const seen = new Set();
+  for (const d of desired) {
+    if (d.end <= now) continue;                       // already over — ThermoHub drops ended entries itself
+    seen.add(d.key);
+    const body = { businessId: bizOf(d.thermostatId), name: d.name, buildingIds: [], thermostatIds: [d.thermostatId], start: d.start, end: d.end, heat: d.heat, cool: d.cool };
+    const detail = { start: new Date(d.start).toISOString(), end: new Date(d.end).toISOString(), heat: d.heat, cool: d.cool };
+    const tgt = { ...d, room: d.windows[0].room, activity: d.windows[0].activity };
+    const o = byKey.get(d.key);
+    if (!o) { await run("create", tgt, () => ops.createOneTime(body), detail); continue; }
+    const same = Number(o.start) === d.start && Number(o.end) === d.end && Number(o.heat) === d.heat && Number(o.cool) === d.cool
+      && (o.thermostatIds || []).length === 1 && o.thermostatIds[0] === d.thermostatId && !(o.buildingIds || []).length;
+    if (!same) await run("update", tgt, () => ops.updateOneTime(o.id, body), detail);
+  }
+  for (const o of mine) {
+    const key = tagOf(o.name);
+    if (seen.has(key)) continue;
+    const thermostatId = (o.thermostatIds || [])[0] || null;
+    await run("delete", { key, thermostatId, thermostatName: nameOf(thermostatId), activity: "booking cancelled, moved or unmapped" }, () => ops.deleteOneTime(o.id), { name: o.name });
   }
 }
 
+// Bookings for the climate sync look a week ahead (entries must exist before
+// the event); doors stay on yesterday..tomorrow since they're reconciled live.
+const fetchClimateSpans = () => fetchBookingSpans(isoDay(-1), isoDay(7));
 const loadAll = () => Promise.all([
   fetchSpans(), getBookingMap(), gvDoorTree().catch(() => []),
   getClimateMap(), thermohubConfigured() ? fetchThermostats().catch(() => []) : Promise.resolve([]),
-  getAutomation(),
+  getAutomation(), fetchClimateSpans().catch(() => []),
+  thermohubConfigured() ? fetchOneTimes().catch(() => []) : Promise.resolve([]),
 ]);
 
 // Today's windows for the Bookings/Automation UI.
@@ -246,7 +283,15 @@ doorsRouter.get(
   "/schedule",
   requireAuth,
   guard("interactive", async () => {
-    const [spans, map, gvDoors, cmap, thermostats, automation] = await loadAll();
+    const [spans, map, gvDoors, cmap, thermostats, automation, climateSpans, oneTimes] = await loadAll();
+    // Flag each climate window with whether its ThermoHub one-time entry exists yet.
+    const cw = climateWindows(climateSpans, cmap, thermostats);
+    const tagged = new Set((oneTimes || []).map((o) => tagOf(o.name)).filter(Boolean));
+    const planned = climatePlan(cw);
+    for (const w of cw) {
+      const entry = planned.find((p) => p.windows.includes(w));
+      w.synced = Boolean(entry && tagged.has(entry.key));
+    }
     return {
       leadMin: config.doors.leadMin,
       lagMin: config.doors.lagMin,
@@ -259,7 +304,7 @@ doorsRouter.get(
       climate: {
         preMin: config.climate.preMin, postMin: config.climate.postMin,
         heat: config.climate.eventHeat, cool: config.climate.eventCool,
-        windows: climateWindows(spans, cmap, thermostats),
+        windows: cw,
       },
     };
   })
@@ -355,14 +400,16 @@ function cronAuth(req, res, next) {
 // `source` records who fired it ('cron' | 'dashboard') for the status line.
 const TICK_KEY = "door-tick", TICK_GATE_TTL = 150_000; // kv skew 60s → ~90s between dashboard ticks
 async function runTick(req, source) {
-  const [spans, map, gvDoors, cmap, thermostats, automation] = await loadAll();
+  const [spans, map, gvDoors, cmap, thermostats, automation, climateSpans, oneTimes] = await loadAll();
   const now = Date.now();
   const actions = [];
 
   // A switched-off subsystem is reconciled against NO windows: nothing new is
-  // opened/held, and anything we still hold from before is released.
+  // opened/held, and anything we still hold from before is released — for
+  // climate, that means our tagged one-time entries are deleted from ThermoHub.
   await reconcileDoors(automation.doors ? doorWindows(spans, map, gvDoors) : [], config.geovision.configured, req, actions, now, gvDoors);
-  await reconcileClimate(automation.climate ? climateWindows(spans, cmap, thermostats) : [], thermohubConfigured(), req, actions, now, thermostats);
+  const desired = automation.climate ? climatePlan(climateWindows(climateSpans, cmap, thermostats)) : [];
+  await syncOneTimes(desired, oneTimes, thermohubConfigured(), req, actions, now, thermostats);
 
   // Same tick also watches for new members — never fails the tick.
   const memberAlerts = await checkNewMembers(req);
